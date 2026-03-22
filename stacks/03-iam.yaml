@@ -355,11 +355,23 @@ Outputs:
     Export:
       Name: !Sub "${EnvironmentName}-LMSAppInstanceProfileArn"
 
+  LMSAppInstanceProfileName:
+    Description: Name of the LMS App Instance Profile
+    Value: !Ref LMSAppInstanceProfile
+    Export:
+      Name: !Sub "${EnvironmentName}-LMSAppInstanceProfileName"
+
   FacultyAppInstanceProfileArn:
     Description: ARN of the Faculty App Instance Profile
     Value: !GetAtt FacultyAppInstanceProfile.Arn
     Export:
       Name: !Sub "${EnvironmentName}-FacultyAppInstanceProfileArn"
+
+  FacultyAppInstanceProfileName:
+    Description: Name of the Faculty App Instance Profile
+    Value: !Ref FacultyAppInstanceProfile
+    Export:
+      Name: !Sub "${EnvironmentName}-FacultyAppInstanceProfileName"
 
   LMSAppRoleArn:
     Description: ARN of the LMS App IAM Role

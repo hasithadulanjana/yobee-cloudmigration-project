@@ -33,7 +33,7 @@ Resources:
       InstanceType: !Ref InstanceTypeApp
       KeyName: !Ref KeyPairName
       IamInstanceProfile:
-        Fn::ImportValue: !Sub "${EnvironmentName}-LMSAppInstanceProfileArn"
+        Fn::ImportValue: !Sub "${EnvironmentName}-LMSAppInstanceProfileName"
       SubnetId:
         Fn::ImportValue: !Sub "${EnvironmentName}-PrivateSubnet1Id"
       SecurityGroupIds:
@@ -77,7 +77,7 @@ Resources:
       InstanceType: !Ref InstanceTypeApp
       KeyName: !Ref KeyPairName
       IamInstanceProfile:
-        Fn::ImportValue: !Sub "${EnvironmentName}-LMSAppInstanceProfileArn"
+        Fn::ImportValue: !Sub "${EnvironmentName}-LMSAppInstanceProfileName"
       SubnetId:
         Fn::ImportValue: !Sub "${EnvironmentName}-PrivateSubnet2Id"
       SecurityGroupIds:
@@ -124,7 +124,7 @@ Resources:
       InstanceType: !Ref InstanceTypeApp
       KeyName: !Ref KeyPairName
       IamInstanceProfile:
-        Fn::ImportValue: !Sub "${EnvironmentName}-FacultyAppInstanceProfileArn"
+        Fn::ImportValue: !Sub "${EnvironmentName}-FacultyAppInstanceProfileName"
       SubnetId:
         Fn::ImportValue: !Sub "${EnvironmentName}-PrivateSubnet1Id"
       SecurityGroupIds:
@@ -169,7 +169,7 @@ Resources:
       InstanceType: !Ref InstanceTypeApp
       KeyName: !Ref KeyPairName
       IamInstanceProfile:
-        Fn::ImportValue: !Sub "${EnvironmentName}-FacultyAppInstanceProfileArn"
+        Fn::ImportValue: !Sub "${EnvironmentName}-FacultyAppInstanceProfileName"
       SubnetId:
         Fn::ImportValue: !Sub "${EnvironmentName}-PrivateSubnet2Id"
       SecurityGroupIds:
