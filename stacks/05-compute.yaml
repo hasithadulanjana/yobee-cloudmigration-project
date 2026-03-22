@@ -1,0 +1,374 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Description: "Yobee Cloud Migration - EC2 Instances, Auto Scaling, and Target Groups"
+
+Parameters:
+  EnvironmentName:
+    Type: String
+    Default: YobeeMigration
+
+  LinuxAMI:
+    Type: AWS::SSM::Parameter::Value<AWS::EC2::Image::Id>
+    Default: /aws/service/ami-amazon-linux-latest/amzn2-ami-hvm-x86_64-gp2
+
+  WindowsAMI:
+    Type: AWS::SSM::Parameter::Value<AWS::EC2::Image::Id>
+    Default: /aws/service/ami-windows-latest/Windows_Server-2022-English-Full-Base
+
+  InstanceTypeApp:
+    Type: String
+    Default: t3.micro
+
+  KeyPairName:
+    Type: String
+
+Resources:
+
+  # ---------------------------------------------------------------------------
+  # LMS Linux Servers
+  # ---------------------------------------------------------------------------
+  LMSServer1:
+    Type: AWS::EC2::Instance
+    Properties:
+      ImageId: !Ref LinuxAMI
+      InstanceType: !Ref InstanceTypeApp
+      KeyName: !Ref KeyPairName
+      IamInstanceProfile:
+        Fn::ImportValue: !Sub "${EnvironmentName}-LMSAppInstanceProfileArn"
+      SubnetId:
+        Fn::ImportValue: !Sub "${EnvironmentName}-PrivateSubnet1Id"
+      SecurityGroupIds:
+        - Fn::ImportValue: !Sub "${EnvironmentName}-LMSSecurityGroupId"
+      BlockDeviceMappings:
+        - DeviceName: /dev/xvda
+          Ebs:
+            VolumeSize: 50
+            VolumeType: gp3
+            Encrypted: true
+            DeleteOnTermination: true
+      UserData:
+        Fn::Base64: !Sub |
+          #!/bin/bash
+          yum update -y
+          yum install -y amazon-cloudwatch-agent httpd php php-mysqlnd
+          systemctl enable httpd
+          systemctl start httpd
+          /opt/aws/amazon-cloudwatch-agent/bin/amazon-cloudwatch-agent-ctl \
+            -a fetch-config -m ec2 -s -c ssm:/AmazonCloudWatch-config
+          INSTANCE_ID=$(curl -s http://169.254.169.254/latest/meta-data/instance-id)
+          aws ec2 create-tags --region ${AWS::Region} \
+            --resources $INSTANCE_ID \
+            --tags Key=Name,Value=${EnvironmentName}-LMS-1 \
+                   Key=Role,Value=LMS \
+                   Key=Project,Value=YobeeMigration
+      Tags:
+        - Key: Name
+          Value: !Sub "${EnvironmentName}-LMS-1"
+        - Key: Role
+          Value: LMS
+        - Key: OS
+          Value: Linux
+        - Key: Project
+          Value: YobeeMigration
+
+  LMSServer2:
+    Type: AWS::EC2::Instance
+    Properties:
+      ImageId: !Ref LinuxAMI
+      InstanceType: !Ref InstanceTypeApp
+      KeyName: !Ref KeyPairName
+      IamInstanceProfile:
+        Fn::ImportValue: !Sub "${EnvironmentName}-LMSAppInstanceProfileArn"
+      SubnetId:
+        Fn::ImportValue: !Sub "${EnvironmentName}-PrivateSubnet2Id"
+      SecurityGroupIds:
+        - Fn::ImportValue: !Sub "${EnvironmentName}-LMSSecurityGroupId"
+      BlockDeviceMappings:
+        - DeviceName: /dev/xvda
+          Ebs:
+            VolumeSize: 50
+            VolumeType: gp3
+            Encrypted: true
+            DeleteOnTermination: true
+      UserData:
+        Fn::Base64: !Sub |
+          #!/bin/bash
+          yum update -y
+          yum install -y amazon-cloudwatch-agent httpd php php-mysqlnd
+          systemctl enable httpd
+          systemctl start httpd
+          /opt/aws/amazon-cloudwatch-agent/bin/amazon-cloudwatch-agent-ctl \
+            -a fetch-config -m ec2 -s -c ssm:/AmazonCloudWatch-config
+          INSTANCE_ID=$(curl -s http://169.254.169.254/latest/meta-data/instance-id)
+          aws ec2 create-tags --region ${AWS::Region} \
+            --resources $INSTANCE_ID \
+            --tags Key=Name,Value=${EnvironmentName}-LMS-2 \
+                   Key=Role,Value=LMS \
+                   Key=Project,Value=YobeeMigration
+      Tags:
+        - Key: Name
+          Value: !Sub "${EnvironmentName}-LMS-2"
+        - Key: Role
+          Value: LMS
+        - Key: OS
+          Value: Linux
+        - Key: Project
+          Value: YobeeMigration
+
+  # ---------------------------------------------------------------------------
+  # Faculty Windows Servers
+  # ---------------------------------------------------------------------------
+  FacultyServer1:
+    Type: AWS::EC2::Instance
+    Properties:
+      ImageId: !Ref WindowsAMI
+      InstanceType: !Ref InstanceTypeApp
+      KeyName: !Ref KeyPairName
+      IamInstanceProfile:
+        Fn::ImportValue: !Sub "${EnvironmentName}-FacultyAppInstanceProfileArn"
+      SubnetId:
+        Fn::ImportValue: !Sub "${EnvironmentName}-PrivateSubnet1Id"
+      SecurityGroupIds:
+        - Fn::ImportValue: !Sub "${EnvironmentName}-FacultySecurityGroupId"
+      BlockDeviceMappings:
+        - DeviceName: /dev/sda1
+          Ebs:
+            VolumeSize: 80
+            VolumeType: gp3
+            Encrypted: true
+            DeleteOnTermination: true
+      UserData:
+        Fn::Base64: !Sub |
+          <powershell>
+          Install-WindowsFeature -Name Web-Server -IncludeManagementTools
+          Install-WindowsFeature -Name Web-Asp-Net45
+          $cwAgentUrl = "https://s3.amazonaws.com/amazoncloudwatch-agent/windows/amd64/latest/amazon-cloudwatch-agent.msi"
+          $cwAgentInstaller = "$env:TEMP\amazon-cloudwatch-agent.msi"
+          Invoke-WebRequest -Uri $cwAgentUrl -OutFile $cwAgentInstaller
+          Start-Process msiexec.exe -ArgumentList "/i $cwAgentInstaller /quiet" -Wait
+          $instanceId = (Invoke-WebRequest -Uri "http://169.254.169.254/latest/meta-data/instance-id").Content
+          $region = "${AWS::Region}"
+          & "C:\Program Files\Amazon\AWSCLIV2\aws.exe" ec2 create-tags `
+            --region $region `
+            --resources $instanceId `
+            --tags Key=Name,Value=${EnvironmentName}-Faculty-1 Key=Role,Value=FacultyApp Key=Project,Value=YobeeMigration
+          </powershell>
+      Tags:
+        - Key: Name
+          Value: !Sub "${EnvironmentName}-Faculty-1"
+        - Key: Role
+          Value: FacultyApp
+        - Key: OS
+          Value: Windows
+        - Key: Project
+          Value: YobeeMigration
+
+  FacultyServer2:
+    Type: AWS::EC2::Instance
+    Properties:
+      ImageId: !Ref WindowsAMI
+      InstanceType: !Ref InstanceTypeApp
+      KeyName: !Ref KeyPairName
+      IamInstanceProfile:
+        Fn::ImportValue: !Sub "${EnvironmentName}-FacultyAppInstanceProfileArn"
+      SubnetId:
+        Fn::ImportValue: !Sub "${EnvironmentName}-PrivateSubnet2Id"
+      SecurityGroupIds:
+        - Fn::ImportValue: !Sub "${EnvironmentName}-FacultySecurityGroupId"
+      BlockDeviceMappings:
+        - DeviceName: /dev/sda1
+          Ebs:
+            VolumeSize: 80
+            VolumeType: gp3
+            Encrypted: true
+            DeleteOnTermination: true
+      UserData:
+        Fn::Base64: !Sub |
+          <powershell>
+          Install-WindowsFeature -Name Web-Server -IncludeManagementTools
+          Install-WindowsFeature -Name Web-Asp-Net45
+          $cwAgentUrl = "https://s3.amazonaws.com/amazoncloudwatch-agent/windows/amd64/latest/amazon-cloudwatch-agent.msi"
+          $cwAgentInstaller = "$env:TEMP\amazon-cloudwatch-agent.msi"
+          Invoke-WebRequest -Uri $cwAgentUrl -OutFile $cwAgentInstaller
+          Start-Process msiexec.exe -ArgumentList "/i $cwAgentInstaller /quiet" -Wait
+          $instanceId = (Invoke-WebRequest -Uri "http://169.254.169.254/latest/meta-data/instance-id").Content
+          $region = "${AWS::Region}"
+          & "C:\Program Files\Amazon\AWSCLIV2\aws.exe" ec2 create-tags `
+            --region $region `
+            --resources $instanceId `
+            --tags Key=Name,Value=${EnvironmentName}-Faculty-2 Key=Role,Value=FacultyApp Key=Project,Value=YobeeMigration
+          </powershell>
+      Tags:
+        - Key: Name
+          Value: !Sub "${EnvironmentName}-Faculty-2"
+        - Key: Role
+          Value: FacultyApp
+        - Key: OS
+          Value: Windows
+        - Key: Project
+          Value: YobeeMigration
+
+  # ---------------------------------------------------------------------------
+  # Target Groups
+  # ---------------------------------------------------------------------------
+  LMSTargetGroup:
+    Type: AWS::ElasticLoadBalancingV2::TargetGroup
+    Properties:
+      Name: !Sub "${EnvironmentName}-LMS-TG"
+      VpcId:
+        Fn::ImportValue: !Sub "${EnvironmentName}-VpcId"
+      Port: 80
+      Protocol: HTTP
+      TargetType: instance
+      HealthCheckPath: /health
+      HealthCheckIntervalSeconds: 30
+      HealthCheckTimeoutSeconds: 5
+      HealthyThresholdCount: 2
+      UnhealthyThresholdCount: 3
+      Targets:
+        - Id: !Ref LMSServer1
+          Port: 80
+        - Id: !Ref LMSServer2
+          Port: 80
+      Tags:
+        - Key: Project
+          Value: YobeeMigration
+
+  FacultyTargetGroup:
+    Type: AWS::ElasticLoadBalancingV2::TargetGroup
+    Properties:
+      Name: !Sub "${EnvironmentName}-Faculty-TG"
+      VpcId:
+        Fn::ImportValue: !Sub "${EnvironmentName}-VpcId"
+      Port: 80
+      Protocol: HTTP
+      TargetType: instance
+      HealthCheckPath: /
+      HealthCheckIntervalSeconds: 30
+      HealthCheckTimeoutSeconds: 5
+      HealthyThresholdCount: 2
+      UnhealthyThresholdCount: 3
+      Targets:
+        - Id: !Ref FacultyServer1
+          Port: 80
+        - Id: !Ref FacultyServer2
+          Port: 80
+      Tags:
+        - Key: Project
+          Value: YobeeMigration
+
+  # ---------------------------------------------------------------------------
+  # LMS Launch Template
+  # ---------------------------------------------------------------------------
+  LMSLaunchTemplate:
+    Type: AWS::EC2::LaunchTemplate
+    Properties:
+      LaunchTemplateName: !Sub "${EnvironmentName}-LMS-LaunchTemplate"
+      LaunchTemplateData:
+        ImageId: !Ref LinuxAMI
+        InstanceType: !Ref InstanceTypeApp
+        KeyName: !Ref KeyPairName
+        IamInstanceProfile:
+          Arn:
+            Fn::ImportValue: !Sub "${EnvironmentName}-LMSAppInstanceProfileArn"
+        SecurityGroupIds:
+          - Fn::ImportValue: !Sub "${EnvironmentName}-LMSSecurityGroupId"
+        BlockDeviceMappings:
+          - DeviceName: /dev/xvda
+            Ebs:
+              VolumeSize: 50
+              VolumeType: gp3
+              Encrypted: true
+              DeleteOnTermination: true
+        UserData:
+          Fn::Base64: !Sub |
+            #!/bin/bash
+            yum update -y
+            yum install -y amazon-cloudwatch-agent httpd php php-mysqlnd
+            systemctl enable httpd
+            systemctl start httpd
+            /opt/aws/amazon-cloudwatch-agent/bin/amazon-cloudwatch-agent-ctl \
+              -a fetch-config -m ec2 -s -c ssm:/AmazonCloudWatch-config
+
+  # ---------------------------------------------------------------------------
+  # LMS Auto Scaling Group
+  # ---------------------------------------------------------------------------
+  LMSAutoScalingGroup:
+    Type: AWS::AutoScaling::AutoScalingGroup
+    Properties:
+      AutoScalingGroupName: !Sub "${EnvironmentName}-LMS-ASG"
+      LaunchTemplate:
+        LaunchTemplateId: !Ref LMSLaunchTemplate
+        Version: !GetAtt LMSLaunchTemplate.LatestVersionNumber
+      MinSize: "0"
+      MaxSize: "6"
+      DesiredCapacity: "0"
+      VPCZoneIdentifier:
+        - Fn::ImportValue: !Sub "${EnvironmentName}-PrivateSubnet1Id"
+        - Fn::ImportValue: !Sub "${EnvironmentName}-PrivateSubnet2Id"
+      TargetGroupARNs:
+        - !Ref LMSTargetGroup
+      HealthCheckType: ELB
+      HealthCheckGracePeriod: 300
+      Tags:
+        - Key: Name
+          Value: !Sub "${EnvironmentName}-LMS-ASG"
+          PropagateAtLaunch: true
+        - Key: Project
+          Value: YobeeMigration
+          PropagateAtLaunch: true
+
+  # ---------------------------------------------------------------------------
+  # LMS Scale-Out Policy
+  # ---------------------------------------------------------------------------
+  LMSScaleOutPolicy:
+    Type: AWS::AutoScaling::ScalingPolicy
+    Properties:
+      AutoScalingGroupName: !Ref LMSAutoScalingGroup
+      PolicyType: TargetTrackingScaling
+      TargetTrackingConfiguration:
+        PredefinedMetricSpecification:
+          PredefinedMetricType: ASGAverageCPUUtilization
+        TargetValue: 70.0
+
+Outputs:
+  LMSServer1Id:
+    Description: Instance ID of LMS Server 1
+    Value: !Ref LMSServer1
+    Export:
+      Name: !Sub "${EnvironmentName}-LMSServer1Id"
+
+  LMSServer2Id:
+    Description: Instance ID of LMS Server 2
+    Value: !Ref LMSServer2
+    Export:
+      Name: !Sub "${EnvironmentName}-LMSServer2Id"
+
+  FacultyServer1Id:
+    Description: Instance ID of Faculty Server 1
+    Value: !Ref FacultyServer1
+    Export:
+      Name: !Sub "${EnvironmentName}-FacultyServer1Id"
+
+  FacultyServer2Id:
+    Description: Instance ID of Faculty Server 2
+    Value: !Ref FacultyServer2
+    Export:
+      Name: !Sub "${EnvironmentName}-FacultyServer2Id"
+
+  LMSAutoScalingGroupName:
+    Description: Name of the LMS Auto Scaling Group
+    Value: !Ref LMSAutoScalingGroup
+    Export:
+      Name: !Sub "${EnvironmentName}-LMSAutoScalingGroupName"
+
+  LMSTargetGroupArn:
+    Description: ARN of the LMS Target Group
+    Value: !Ref LMSTargetGroup
+    Export:
+      Name: !Sub "${EnvironmentName}-LMSTargetGroupArn"
+
+  FacultyTargetGroupArn:
+    Description: ARN of the Faculty Target Group
+    Value: !Ref FacultyTargetGroup
+    Export:
+      Name: !Sub "${EnvironmentName}-FacultyTargetGroupArn"

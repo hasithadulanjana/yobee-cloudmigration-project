@@ -1,0 +1,339 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Description: "Yobee Cloud Migration - CloudWatch Alarms and Dashboard"
+
+Parameters:
+  EnvironmentName:
+    Type: String
+    Default: YobeeMigration
+
+  AdminEmail:
+    Type: String
+    Default: admin@yoobee.ac.nz
+
+Resources:
+
+  # ---------------------------------------------------------------------------
+  # SNS Topic for alarm notifications
+  # ---------------------------------------------------------------------------
+  YoobeeAlarmTopic:
+    Type: AWS::SNS::Topic
+    Properties:
+      TopicName: !Sub "${EnvironmentName}-Alarms"
+      Subscription:
+        - Endpoint: !Ref AdminEmail
+          Protocol: email
+
+  # ---------------------------------------------------------------------------
+  # EC2 Alarms — LMS Server 1
+  # ---------------------------------------------------------------------------
+  LMS1CPUAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: !Sub "${EnvironmentName}-LMS1-HighCPU"
+      AlarmDescription: "High CPU utilization on LMS Server 1"
+      Namespace: AWS/EC2
+      MetricName: CPUUtilization
+      Dimensions:
+        - Name: InstanceId
+          Value:
+            Fn::ImportValue: !Sub "${EnvironmentName}-LMSServer1Id"
+      Statistic: Average
+      Period: 300
+      EvaluationPeriods: 2
+      Threshold: 80
+      ComparisonOperator: GreaterThanThreshold
+      AlarmActions:
+        - !Ref YoobeeAlarmTopic
+      OKActions:
+        - !Ref YoobeeAlarmTopic
+
+  LMS1StatusCheckAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: !Sub "${EnvironmentName}-LMS1-StatusCheck"
+      AlarmDescription: "Status check failure on LMS Server 1"
+      Namespace: AWS/EC2
+      MetricName: StatusCheckFailed
+      Dimensions:
+        - Name: InstanceId
+          Value:
+            Fn::ImportValue: !Sub "${EnvironmentName}-LMSServer1Id"
+      Statistic: Maximum
+      Period: 60
+      EvaluationPeriods: 2
+      Threshold: 1
+      ComparisonOperator: GreaterThanOrEqualToThreshold
+      AlarmActions:
+        - !Ref YoobeeAlarmTopic
+      OKActions:
+        - !Ref YoobeeAlarmTopic
+
+  # ---------------------------------------------------------------------------
+  # EC2 Alarms — LMS Server 2
+  # ---------------------------------------------------------------------------
+  LMS2CPUAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: !Sub "${EnvironmentName}-LMS2-HighCPU"
+      AlarmDescription: "High CPU utilization on LMS Server 2"
+      Namespace: AWS/EC2
+      MetricName: CPUUtilization
+      Dimensions:
+        - Name: InstanceId
+          Value:
+            Fn::ImportValue: !Sub "${EnvironmentName}-LMSServer2Id"
+      Statistic: Average
+      Period: 300
+      EvaluationPeriods: 2
+      Threshold: 80
+      ComparisonOperator: GreaterThanThreshold
+      AlarmActions:
+        - !Ref YoobeeAlarmTopic
+      OKActions:
+        - !Ref YoobeeAlarmTopic
+
+  # ---------------------------------------------------------------------------
+  # EC2 Alarms — Faculty Server 1
+  # ---------------------------------------------------------------------------
+  Faculty1CPUAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: !Sub "${EnvironmentName}-Faculty1-HighCPU"
+      AlarmDescription: "High CPU utilization on Faculty Server 1"
+      Namespace: AWS/EC2
+      MetricName: CPUUtilization
+      Dimensions:
+        - Name: InstanceId
+          Value:
+            Fn::ImportValue: !Sub "${EnvironmentName}-FacultyServer1Id"
+      Statistic: Average
+      Period: 300
+      EvaluationPeriods: 2
+      Threshold: 80
+      ComparisonOperator: GreaterThanThreshold
+      AlarmActions:
+        - !Ref YoobeeAlarmTopic
+      OKActions:
+        - !Ref YoobeeAlarmTopic
+
+  # ---------------------------------------------------------------------------
+  # EC2 Alarms — Faculty Server 2
+  # ---------------------------------------------------------------------------
+  Faculty2CPUAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: !Sub "${EnvironmentName}-Faculty2-HighCPU"
+      AlarmDescription: "High CPU utilization on Faculty Server 2"
+      Namespace: AWS/EC2
+      MetricName: CPUUtilization
+      Dimensions:
+        - Name: InstanceId
+          Value:
+            Fn::ImportValue: !Sub "${EnvironmentName}-FacultyServer2Id"
+      Statistic: Average
+      Period: 300
+      EvaluationPeriods: 2
+      Threshold: 80
+      ComparisonOperator: GreaterThanThreshold
+      AlarmActions:
+        - !Ref YoobeeAlarmTopic
+      OKActions:
+        - !Ref YoobeeAlarmTopic
+
+  # ---------------------------------------------------------------------------
+  # RDS Alarms
+  # ---------------------------------------------------------------------------
+  RDSConnectionAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: !Sub "${EnvironmentName}-RDS-HighConnections"
+      AlarmDescription: "High number of database connections on RDS instance"
+      Namespace: AWS/RDS
+      MetricName: DatabaseConnections
+      Dimensions:
+        - Name: DBInstanceIdentifier
+          Value:
+            Fn::ImportValue: !Sub "${EnvironmentName}-DBIdentifier"
+      Statistic: Average
+      Period: 300
+      EvaluationPeriods: 2
+      Threshold: 80
+      ComparisonOperator: GreaterThanThreshold
+      AlarmActions:
+        - !Ref YoobeeAlarmTopic
+      OKActions:
+        - !Ref YoobeeAlarmTopic
+
+  RDSStorageAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: !Sub "${EnvironmentName}-RDS-LowStorage"
+      AlarmDescription: "RDS free storage space is critically low (below 5 GB)"
+      Namespace: AWS/RDS
+      MetricName: FreeStorageSpace
+      Dimensions:
+        - Name: DBInstanceIdentifier
+          Value:
+            Fn::ImportValue: !Sub "${EnvironmentName}-DBIdentifier"
+      Statistic: Average
+      Period: 300
+      EvaluationPeriods: 1
+      Threshold: 5368709120
+      ComparisonOperator: LessThanThreshold
+      AlarmActions:
+        - !Ref YoobeeAlarmTopic
+      OKActions:
+        - !Ref YoobeeAlarmTopic
+
+  # ---------------------------------------------------------------------------
+  # ALB Alarm
+  # ---------------------------------------------------------------------------
+  ALB5xxAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: !Sub "${EnvironmentName}-ALB-5xxErrors"
+      AlarmDescription: "Elevated 5xx error rate on the Application Load Balancer"
+      Namespace: AWS/ApplicationELB
+      MetricName: HTTPCode_ELB_5XX_Count
+      Dimensions:
+        - Name: LoadBalancer
+          Value:
+            Fn::ImportValue: !Sub "${EnvironmentName}-ALBFullName"
+      Statistic: Sum
+      Period: 300
+      EvaluationPeriods: 1
+      Threshold: 10
+      ComparisonOperator: GreaterThanThreshold
+      TreatMissingData: notBreaching
+      AlarmActions:
+        - !Ref YoobeeAlarmTopic
+      OKActions:
+        - !Ref YoobeeAlarmTopic
+
+  # ---------------------------------------------------------------------------
+  # CloudWatch Dashboard
+  # ---------------------------------------------------------------------------
+  YoobeeDashboard:
+    Type: AWS::CloudWatch::Dashboard
+    Properties:
+      DashboardName: !Sub "${EnvironmentName}-Infrastructure"
+      DashboardBody:
+        !Sub
+          - |
+            {
+              "widgets": [
+                {
+                  "type": "metric",
+                  "x": 0,
+                  "y": 0,
+                  "width": 12,
+                  "height": 6,
+                  "properties": {
+                    "title": "EC2 CPU Utilization - All Servers",
+                    "view": "timeSeries",
+                    "stacked": false,
+                    "region": "${AWS::Region}",
+                    "period": 300,
+                    "stat": "Average",
+                    "metrics": [
+                      ["AWS/EC2", "CPUUtilization", "InstanceId", "${LMSServer1Id}", {"label": "LMS Server 1"}],
+                      ["AWS/EC2", "CPUUtilization", "InstanceId", "${LMSServer2Id}", {"label": "LMS Server 2"}],
+                      ["AWS/EC2", "CPUUtilization", "InstanceId", "${FacultyServer1Id}", {"label": "Faculty Server 1"}],
+                      ["AWS/EC2", "CPUUtilization", "InstanceId", "${FacultyServer2Id}", {"label": "Faculty Server 2"}]
+                    ],
+                    "yAxis": {
+                      "left": {
+                        "min": 0,
+                        "max": 100,
+                        "label": "Percent"
+                      }
+                    }
+                  }
+                },
+                {
+                  "type": "metric",
+                  "x": 12,
+                  "y": 0,
+                  "width": 12,
+                  "height": 6,
+                  "properties": {
+                    "title": "RDS Database Metrics",
+                    "view": "timeSeries",
+                    "stacked": false,
+                    "region": "${AWS::Region}",
+                    "period": 300,
+                    "metrics": [
+                      ["AWS/RDS", "DatabaseConnections", "DBInstanceIdentifier", "${DBId}", {"label": "DB Connections", "stat": "Average"}],
+                      ["AWS/RDS", "FreeStorageSpace",    "DBInstanceIdentifier", "${DBId}", {"label": "Free Storage (bytes)", "stat": "Average", "yAxis": "right"}]
+                    ],
+                    "yAxis": {
+                      "left":  {"label": "Connections", "min": 0},
+                      "right": {"label": "Bytes",       "min": 0}
+                    }
+                  }
+                },
+                {
+                  "type": "metric",
+                  "x": 0,
+                  "y": 6,
+                  "width": 12,
+                  "height": 6,
+                  "properties": {
+                    "title": "ALB Request Metrics",
+                    "view": "timeSeries",
+                    "stacked": false,
+                    "region": "${AWS::Region}",
+                    "period": 300,
+                    "metrics": [
+                      ["AWS/ApplicationELB", "RequestCount",           "LoadBalancer", "${ALBName}", {"label": "Request Count",    "stat": "Sum"}],
+                      ["AWS/ApplicationELB", "HTTPCode_ELB_5XX_Count", "LoadBalancer", "${ALBName}", {"label": "5xx Error Count",  "stat": "Sum", "yAxis": "right"}]
+                    ],
+                    "yAxis": {
+                      "left":  {"label": "Requests", "min": 0},
+                      "right": {"label": "Errors",   "min": 0}
+                    }
+                  }
+                },
+                {
+                  "type": "metric",
+                  "x": 12,
+                  "y": 6,
+                  "width": 12,
+                  "height": 6,
+                  "properties": {
+                    "title": "Auto Scaling Group",
+                    "view": "timeSeries",
+                    "stacked": false,
+                    "region": "${AWS::Region}",
+                    "period": 300,
+                    "metrics": [
+                      ["AWS/AutoScaling", "GroupInServiceInstances", "AutoScalingGroupName", "${ASGName}", {"label": "In-Service Instances", "stat": "Average"}]
+                    ],
+                    "yAxis": {
+                      "left": {"label": "Instance Count", "min": 0}
+                    }
+                  }
+                }
+              ]
+            }
+          - LMSServer1Id:
+              Fn::ImportValue: !Sub "${EnvironmentName}-LMSServer1Id"
+            LMSServer2Id:
+              Fn::ImportValue: !Sub "${EnvironmentName}-LMSServer2Id"
+            FacultyServer1Id:
+              Fn::ImportValue: !Sub "${EnvironmentName}-FacultyServer1Id"
+            FacultyServer2Id:
+              Fn::ImportValue: !Sub "${EnvironmentName}-FacultyServer2Id"
+            DBId:
+              Fn::ImportValue: !Sub "${EnvironmentName}-DBIdentifier"
+            ALBName:
+              Fn::ImportValue: !Sub "${EnvironmentName}-ALBFullName"
+            ASGName:
+              Fn::ImportValue: !Sub "${EnvironmentName}-LMSAutoScalingGroupName"
+
+Outputs:
+  AlarmTopicArn:
+    Description: ARN of the SNS topic used for alarm notifications
+    Value: !Ref YoobeeAlarmTopic
+    Export:
+      Name: !Sub "${EnvironmentName}-AlarmTopicArn"

@@ -1,0 +1,142 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Description: >
+  yobee-cloudmigration-project - Storage Stack
+  Provisions S3 buckets for LMS assets and ALB access logs,
+  including bucket policies, versioning, encryption, lifecycle rules,
+  and CORS configuration for the Yobee migration environment.
+
+Parameters:
+  EnvironmentName:
+    Type: String
+    Default: YobeeMigration
+    Description: Environment name used as a prefix for all exports.
+
+Resources:
+
+  # ---------------------------------------------------------------------------
+  # Access Logs Bucket
+  # ---------------------------------------------------------------------------
+  YoobeeAccessLogsBucket:
+    Type: AWS::S3::Bucket
+    DeletionPolicy: Delete
+    Properties:
+      BucketName: !Sub "yobee-access-logs-${AWS::AccountId}"
+      AccessControl: Private
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
+      LifecycleConfiguration:
+        Rules:
+          - Id: DeleteOldLogs
+            Status: Enabled
+            ExpirationInDays: 90
+      Tags:
+        - Key: Name
+          Value: !Sub "${EnvironmentName}-AccessLogsBucket"
+        - Key: Project
+          Value: YobeeMigration
+        - Key: Environment
+          Value: !Ref EnvironmentName
+
+  YoobeeAccessLogsBucketPolicy:
+    Type: AWS::S3::BucketPolicy
+    Properties:
+      Bucket: !Ref YoobeeAccessLogsBucket
+      PolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Sid: AllowALBAccessLogs
+            Effect: Allow
+            Principal:
+              AWS: arn:aws:iam::783225319266:root
+            Action: s3:PutObject
+            Resource: !Sub "arn:aws:s3:::yobee-access-logs-${AWS::AccountId}/alb-access-logs/AWSLogs/${AWS::AccountId}/*"
+
+  # ---------------------------------------------------------------------------
+  # LMS Assets Bucket
+  # ---------------------------------------------------------------------------
+  YoobeeS3Bucket:
+    Type: AWS::S3::Bucket
+    DeletionPolicy: Delete
+    Properties:
+      BucketName: !Sub "yobee-lms-assets-${AWS::AccountId}"
+      AccessControl: Private
+      VersioningConfiguration:
+        Status: Enabled
+      BucketEncryption:
+        ServerSideEncryptionConfiguration:
+          - ServerSideEncryptionByDefault:
+              SSEAlgorithm: AES256
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
+      LoggingConfiguration:
+        DestinationBucketName: !Ref YoobeeAccessLogsBucket
+        LogFilePrefix: s3-access-logs/
+      LifecycleConfiguration:
+        Rules:
+          - Id: ArchiveOldVersions
+            Status: Enabled
+            NoncurrentVersionTransitions:
+              - TransitionInDays: 90
+                StorageClass: STANDARD_IA
+            NoncurrentVersionExpiration:
+              NoncurrentDays: 365
+      CorsConfiguration:
+        CorsRules:
+          - AllowedMethods:
+              - GET
+            AllowedOrigins:
+              - "https://*.yoobee.ac.nz"
+            AllowedHeaders:
+              - "*"
+            MaxAge: 3600
+      Tags:
+        - Key: Name
+          Value: !Sub "${EnvironmentName}-LMSAssetsBucket"
+        - Key: Project
+          Value: YobeeMigration
+        - Key: Environment
+          Value: !Ref EnvironmentName
+
+  YoobeeS3BucketPolicy:
+    Type: AWS::S3::BucketPolicy
+    Properties:
+      Bucket: !Ref YoobeeS3Bucket
+      PolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Sid: DenyNonSSL
+            Effect: Deny
+            Principal: "*"
+            Action: "s3:*"
+            Resource:
+              - !GetAtt YoobeeS3Bucket.Arn
+              - !Sub "${YoobeeS3Bucket.Arn}/*"
+            Condition:
+              Bool:
+                "aws:SecureTransport": "false"
+
+Outputs:
+
+  S3BucketArn:
+    Description: ARN of the LMS Assets S3 bucket
+    Value: !GetAtt YoobeeS3Bucket.Arn
+    Export:
+      Name: !Sub "${EnvironmentName}-S3BucketArn"
+
+  S3BucketName:
+    Description: Name of the LMS Assets S3 bucket
+    Value: !Ref YoobeeS3Bucket
+    Export:
+      Name: !Sub "${EnvironmentName}-S3BucketName"
+
+  AccessLogsBucketName:
+    Description: Name of the Access Logs S3 bucket
+    Value: !Ref YoobeeAccessLogsBucket
+    Export:
+      Name: !Sub "${EnvironmentName}-AccessLogsBucketName"

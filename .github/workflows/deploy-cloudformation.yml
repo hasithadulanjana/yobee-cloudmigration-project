@@ -1,11 +1,11 @@
-name: Deploy CloudFormation Stack
+name: Deploy Yobee Cloud Migration Stacks
 
 on:
   push:
     branches:
       - main
     paths:
-      - 'yoobee-cloudformation-stack.yaml'
+      - 'stacks/*.yaml'
       - '.github/workflows/deploy-cloudformation.yml'
   workflow_dispatch:
     inputs:
@@ -17,14 +17,21 @@ on:
         options:
           - deploy
           - delete
+      environment_name:
+        description: 'Environment name (stack prefix)'
+        required: false
+        default: 'YobeeMigration'
 
 env:
-  STACK_NAME: yoobee-college-stack
-  AWS_REGION: ap-southeast-2        # Change to your target region
+  AWS_REGION: ap-southeast-2
+  ENV_NAME: YobeeMigration
 
 jobs:
+  # -----------------------------------------------------------------------
+  # DEPLOY — runs on push to main or workflow_dispatch(deploy)
+  # -----------------------------------------------------------------------
   deploy:
-    name: Deploy to AWS
+    name: Deploy All Stacks
     runs-on: ubuntu-latest
     if: github.event_name != 'workflow_dispatch' || github.event.inputs.action == 'deploy'
 
@@ -39,35 +46,120 @@ jobs:
           aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
           aws-region: ${{ env.AWS_REGION }}
 
-      - name: Validate CloudFormation template
+      # ── Validate all templates before deploying anything ──────────────
+      - name: Validate all templates
         run: |
-          aws cloudformation validate-template \
-            --template-body file://yoobee-cloudformation-stack.yaml
+          for f in stacks/*.yaml; do
+            echo "Validating $f ..."
+            aws cloudformation validate-template --template-body file://$f
+          done
 
-      - name: Deploy CloudFormation stack
+      # ── 01 Network ─────────────────────────────────────────────────────
+      - name: Deploy 01-network
         run: |
           aws cloudformation deploy \
-            --template-file yoobee-cloudformation-stack.yaml \
-            --stack-name ${{ env.STACK_NAME }} \
+            --template-file stacks/01-network.yaml \
+            --stack-name yobee-cloudmigration-network \
             --parameter-overrides \
-              DBPassword=${{ secrets.DB_PASSWORD }} \
-              KeyPairName=${{ secrets.KEY_PAIR_NAME }} \
-              DBUsername=${{ secrets.DB_USERNAME }} \
-              AdminEmail=${{ secrets.ADMIN_EMAIL }} \
+              EnvironmentName=${{ env.ENV_NAME }} \
               AllowedAdminCIDR=${{ secrets.ALLOWED_ADMIN_CIDR }} \
             --capabilities CAPABILITY_NAMED_IAM \
             --no-fail-on-empty-changeset
 
+      # ── 02 Storage ─────────────────────────────────────────────────────
+      - name: Deploy 02-storage
+        run: |
+          aws cloudformation deploy \
+            --template-file stacks/02-storage.yaml \
+            --stack-name yobee-cloudmigration-storage \
+            --parameter-overrides \
+              EnvironmentName=${{ env.ENV_NAME }} \
+            --capabilities CAPABILITY_NAMED_IAM \
+            --no-fail-on-empty-changeset
+
+      # ── 03 IAM ─────────────────────────────────────────────────────────
+      - name: Deploy 03-iam
+        run: |
+          aws cloudformation deploy \
+            --template-file stacks/03-iam.yaml \
+            --stack-name yobee-cloudmigration-iam \
+            --parameter-overrides \
+              EnvironmentName=${{ env.ENV_NAME }} \
+            --capabilities CAPABILITY_NAMED_IAM \
+            --no-fail-on-empty-changeset
+
+      # ── 04 Database ────────────────────────────────────────────────────
+      - name: Deploy 04-database
+        run: |
+          aws cloudformation deploy \
+            --template-file stacks/04-database.yaml \
+            --stack-name yobee-cloudmigration-database \
+            --parameter-overrides \
+              EnvironmentName=${{ env.ENV_NAME }} \
+              DBPassword=${{ secrets.DB_PASSWORD }} \
+              DBUsername=${{ secrets.DB_USERNAME }} \
+            --capabilities CAPABILITY_NAMED_IAM \
+            --no-fail-on-empty-changeset
+
+      # ── 05 Compute ─────────────────────────────────────────────────────
+      - name: Deploy 05-compute
+        run: |
+          aws cloudformation deploy \
+            --template-file stacks/05-compute.yaml \
+            --stack-name yobee-cloudmigration-compute \
+            --parameter-overrides \
+              EnvironmentName=${{ env.ENV_NAME }} \
+              KeyPairName=${{ secrets.KEY_PAIR_NAME }} \
+            --capabilities CAPABILITY_NAMED_IAM \
+            --no-fail-on-empty-changeset
+
+      # ── 06 ALB ─────────────────────────────────────────────────────────
+      - name: Deploy 06-alb
+        run: |
+          aws cloudformation deploy \
+            --template-file stacks/06-alb.yaml \
+            --stack-name yobee-cloudmigration-alb \
+            --parameter-overrides \
+              EnvironmentName=${{ env.ENV_NAME }} \
+            --capabilities CAPABILITY_NAMED_IAM \
+            --no-fail-on-empty-changeset
+
+      # ── 07 Monitoring ──────────────────────────────────────────────────
+      - name: Deploy 07-monitoring
+        run: |
+          aws cloudformation deploy \
+            --template-file stacks/07-monitoring.yaml \
+            --stack-name yobee-cloudmigration-monitoring \
+            --parameter-overrides \
+              EnvironmentName=${{ env.ENV_NAME }} \
+              AdminEmail=${{ secrets.ADMIN_EMAIL }} \
+            --capabilities CAPABILITY_NAMED_IAM \
+            --no-fail-on-empty-changeset
+
+      # ── Summary ────────────────────────────────────────────────────────
       - name: Show stack outputs
         if: success()
         run: |
-          aws cloudformation describe-stacks \
-            --stack-name ${{ env.STACK_NAME }} \
-            --query 'Stacks[0].Outputs' \
-            --output table
+          for stack in \
+            yobee-cloudmigration-network \
+            yobee-cloudmigration-storage \
+            yobee-cloudmigration-iam \
+            yobee-cloudmigration-database \
+            yobee-cloudmigration-compute \
+            yobee-cloudmigration-alb \
+            yobee-cloudmigration-monitoring; do
+            echo "=== $stack ==="
+            aws cloudformation describe-stacks \
+              --stack-name $stack \
+              --query 'Stacks[0].Outputs' \
+              --output table 2>/dev/null || echo "(no outputs)"
+          done
 
+  # -----------------------------------------------------------------------
+  # DELETE — tears down all stacks in reverse order
+  # -----------------------------------------------------------------------
   delete:
-    name: Delete Stack
+    name: Delete All Stacks
     runs-on: ubuntu-latest
     if: github.event_name == 'workflow_dispatch' && github.event.inputs.action == 'delete'
 
@@ -79,13 +171,18 @@ jobs:
           aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
           aws-region: ${{ env.AWS_REGION }}
 
-      - name: Delete CloudFormation stack
+      - name: Delete stacks in reverse order
         run: |
-          aws cloudformation delete-stack \
-            --stack-name ${{ env.STACK_NAME }}
-
-      - name: Wait for deletion
-        run: |
-          aws cloudformation wait stack-delete-complete \
-            --stack-name ${{ env.STACK_NAME }}
-          echo "Stack deleted successfully."
+          for stack in \
+            yobee-cloudmigration-monitoring \
+            yobee-cloudmigration-alb \
+            yobee-cloudmigration-compute \
+            yobee-cloudmigration-database \
+            yobee-cloudmigration-iam \
+            yobee-cloudmigration-storage \
+            yobee-cloudmigration-network; do
+            echo "Deleting $stack ..."
+            aws cloudformation delete-stack --stack-name $stack || true
+            aws cloudformation wait stack-delete-complete --stack-name $stack 2>/dev/null || true
+            echo "$stack deleted."
+          done

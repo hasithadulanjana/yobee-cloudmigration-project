@@ -1,0 +1,386 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Description: "Yobee Cloud Migration - IAM Roles, Instance Profiles and User Groups"
+
+Parameters:
+  EnvironmentName:
+    Type: String
+    Default: YobeeMigration
+
+Resources:
+
+  # ============================================================
+  # EC2 Instance Roles
+  # ============================================================
+
+  LMSAppRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub "${EnvironmentName}-LMSAppRole"
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: ec2.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/CloudWatchAgentServerPolicy
+        - arn:aws:iam::aws:policy/AmazonSSMManagedInstanceCore
+      Policies:
+        - PolicyName: S3ReadWriteCourseBucket
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: Allow
+                Action:
+                  - s3:GetObject
+                  - s3:PutObject
+                  - s3:DeleteObject
+                  - s3:ListBucket
+                Resource:
+                  - !Sub "arn:aws:s3:::yobee-lms-assets-${AWS::AccountId}"
+                  - !Sub "arn:aws:s3:::yobee-lms-assets-${AWS::AccountId}/*"
+        - PolicyName: CloudWatchLogsWrite
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: Allow
+                Action:
+                  - logs:PutLogEvents
+                  - logs:CreateLogStream
+                  - logs:CreateLogGroup
+                  - logs:DescribeLogStreams
+                Resource: !Sub "arn:aws:logs:${AWS::Region}:${AWS::AccountId}:log-group:/yoobee/lms/*"
+      Tags:
+        - Key: Project
+          Value: YobeeMigration
+
+  LMSAppInstanceProfile:
+    Type: AWS::IAM::InstanceProfile
+    Properties:
+      InstanceProfileName: !Sub "${EnvironmentName}-LMSApp-InstanceProfile"
+      Roles:
+        - !Ref LMSAppRole
+
+  FacultyAppRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub "${EnvironmentName}-FacultyAppRole"
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: ec2.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/CloudWatchAgentServerPolicy
+        - arn:aws:iam::aws:policy/AmazonSSMManagedInstanceCore
+      Policies:
+        - PolicyName: S3ReadFacultyBucket
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: Allow
+                Action:
+                  - s3:GetObject
+                  - s3:ListBucket
+                Resource:
+                  - !Sub "arn:aws:s3:::yobee-lms-assets-${AWS::AccountId}"
+                  - !Sub "arn:aws:s3:::yobee-lms-assets-${AWS::AccountId}/faculty/*"
+        - PolicyName: CloudWatchLogsWrite
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: Allow
+                Action:
+                  - logs:PutLogEvents
+                  - logs:CreateLogStream
+                  - logs:CreateLogGroup
+                  - logs:DescribeLogStreams
+                Resource: !Sub "arn:aws:logs:${AWS::Region}:${AWS::AccountId}:log-group:/yoobee/faculty/*"
+      Tags:
+        - Key: Project
+          Value: YobeeMigration
+
+  FacultyAppInstanceProfile:
+    Type: AWS::IAM::InstanceProfile
+    Properties:
+      InstanceProfileName: !Sub "${EnvironmentName}-FacultyApp-InstanceProfile"
+      Roles:
+        - !Ref FacultyAppRole
+
+  DBAccessRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub "${EnvironmentName}-DBAccessRole"
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: ec2.amazonaws.com
+            Action: sts:AssumeRole
+      Policies:
+        - PolicyName: RDSDescribeOnly
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: Allow
+                Action:
+                  - rds:DescribeDBInstances
+                  - rds:DescribeDBClusters
+                  - rds:DescribeDBSnapshots
+                Resource: !Sub "arn:aws:rds:${AWS::Region}:${AWS::AccountId}:db:*"
+        - PolicyName: DenyEC2Access
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: Deny
+                Action: "ec2:*"
+                Resource: "*"
+      Tags:
+        - Key: Project
+          Value: YobeeMigration
+
+  StudentCognitoRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub "${EnvironmentName}-StudentCognitoRole"
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Federated: cognito-identity.amazonaws.com
+            Action: sts:AssumeRoleWithWebIdentity
+            Condition:
+              StringEquals:
+                "cognito-identity.amazonaws.com:aud": !Sub "${AWS::AccountId}"
+              ForAnyValue:StringLike:
+                "cognito-identity.amazonaws.com:amr": authenticated
+      Policies:
+        - PolicyName: StudentCourseMaterialsReadOnly
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: Allow
+                Action:
+                  - s3:GetObject
+                Resource:
+                  !Sub
+                    - "${S3Arn}/course-materials/*"
+                    - S3Arn: !ImportValue
+                        "Fn::Sub": "${EnvironmentName}-S3BucketArn"
+      Tags:
+        - Key: Project
+          Value: YobeeMigration
+
+  AutoScalingServiceRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub "${EnvironmentName}-AutoScaling-Role"
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: application-autoscaling.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AmazonEC2RoleforAWSCodeDeploy
+
+  # ============================================================
+  # IAM User Groups
+  # ============================================================
+
+  CloudAdminGroup:
+    Type: AWS::IAM::Group
+    Properties:
+      GroupName: !Sub "${EnvironmentName}-CloudAdmins"
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/IAMFullAccess
+        - arn:aws:iam::aws:policy/AmazonVPCFullAccess
+        - arn:aws:iam::aws:policy/AmazonEC2FullAccess
+        - arn:aws:iam::aws:policy/AmazonRDSFullAccess
+        - arn:aws:iam::aws:policy/AmazonS3FullAccess
+        - arn:aws:iam::aws:policy/CloudWatchFullAccess
+
+  ITAdminGroup:
+    Type: AWS::IAM::Group
+    Properties:
+      GroupName: !Sub "${EnvironmentName}-ITAdmins"
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/AmazonEC2FullAccess
+        - arn:aws:iam::aws:policy/AmazonRDSFullAccess
+        - arn:aws:iam::aws:policy/AmazonVPCFullAccess
+        - arn:aws:iam::aws:policy/CloudWatchFullAccess
+      Policies:
+        - PolicyName: EnforceMFA
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: Deny
+                NotAction:
+                  - iam:CreateVirtualMFADevice
+                  - iam:EnableMFADevice
+                  - iam:GetUser
+                  - iam:ListMFADevices
+                  - iam:ListVirtualMFADevices
+                  - iam:ResyncMFADevice
+                  - sts:GetSessionToken
+                Resource: "*"
+                Condition:
+                  BoolIfExists:
+                    "aws:MultiFactorAuthPresent": "false"
+        - PolicyName: SSMSessionAccess
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: Allow
+                Action:
+                  - ssm:StartSession
+                  - ssm:ResumeSession
+                  - ssm:TerminateSession
+                  - ssm:DescribeSessions
+                  - ssm:GetConnectionStatus
+                  - ssm:DescribeInstanceInformation
+                  - ssm:DescribeInstanceProperties
+                Resource: "*"
+              - Effect: Allow
+                Action:
+                  - ssm:StartSession
+                Resource:
+                  - !Sub "arn:aws:ssm:${AWS::Region}::document/AWS-StartPortForwardingSession"
+                  - !Sub "arn:aws:ssm:${AWS::Region}::document/AWS-StartPortForwardingSessionToRemoteHost"
+
+  FacultyGroup:
+    Type: AWS::IAM::Group
+    Properties:
+      GroupName: !Sub "${EnvironmentName}-Faculty"
+      Policies:
+        - PolicyName: FacultyReadOnly
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: Allow
+                Action:
+                  - "ec2:Describe*"
+                  - s3:GetObject
+                  - s3:ListBucket
+                Resource: "*"
+              - Effect: Deny
+                Action: "rds:*"
+                Resource: "*"
+        - PolicyName: SSMSessionFacultyServersOnly
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: Allow
+                Action:
+                  - ssm:StartSession
+                  - ssm:ResumeSession
+                  - ssm:TerminateSession
+                  - ssm:GetConnectionStatus
+                Resource: !Sub "arn:aws:ec2:${AWS::Region}:${AWS::AccountId}:instance/*"
+                Condition:
+                  StringEquals:
+                    "aws:ResourceTag/Role": FacultyApp
+              - Effect: Allow
+                Action:
+                  - ssm:StartSession
+                Resource: !Sub "arn:aws:ssm:${AWS::Region}::document/AWS-StartPortForwardingSession"
+              - Effect: Allow
+                Action:
+                  - ssm:DescribeSessions
+                  - ssm:DescribeInstanceInformation
+                  - ssm:GetConnectionStatus
+                Resource: "*"
+
+  StudentGroup:
+    Type: AWS::IAM::Group
+    Properties:
+      GroupName: !Sub "${EnvironmentName}-Students"
+      Policies:
+        - PolicyName: StudentS3ReadOnly
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: Allow
+                Action:
+                  - s3:GetObject
+                Resource:
+                  !Sub
+                    - "${S3Arn}/course-materials/*"
+                    - S3Arn: !ImportValue
+                        "Fn::Sub": "${EnvironmentName}-S3BucketArn"
+              - Effect: Deny
+                Action:
+                  - "ec2:*"
+                  - "rds:*"
+                  - "iam:*"
+                Resource: "*"
+
+  ReadOnlyOpsGroup:
+    Type: AWS::IAM::Group
+    Properties:
+      GroupName: !Sub "${EnvironmentName}-ReadOnlyOps"
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/CloudWatchReadOnlyAccess
+      Policies:
+        - PolicyName: EC2DescribeOnly
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: Allow
+                Action:
+                  - "ec2:Describe*"
+                Resource: "*"
+              - Effect: Deny
+                Action:
+                  - "ec2:Create*"
+                  - "ec2:Delete*"
+                  - "ec2:Modify*"
+                  - "ec2:Run*"
+                  - "ec2:Start*"
+                  - "ec2:Stop*"
+                  - "ec2:Terminate*"
+                Resource: "*"
+
+Outputs:
+
+  LMSAppInstanceProfileArn:
+    Description: ARN of the LMS App Instance Profile
+    Value: !GetAtt LMSAppInstanceProfile.Arn
+    Export:
+      Name: !Sub "${EnvironmentName}-LMSAppInstanceProfileArn"
+
+  FacultyAppInstanceProfileArn:
+    Description: ARN of the Faculty App Instance Profile
+    Value: !GetAtt FacultyAppInstanceProfile.Arn
+    Export:
+      Name: !Sub "${EnvironmentName}-FacultyAppInstanceProfileArn"
+
+  LMSAppRoleArn:
+    Description: ARN of the LMS App IAM Role
+    Value: !GetAtt LMSAppRole.Arn
+    Export:
+      Name: !Sub "${EnvironmentName}-LMSAppRoleArn"
+
+  ITAdminGroupArn:
+    Description: ARN of the IT Admin IAM Group
+    Value: !GetAtt ITAdminGroup.Arn
+    Export:
+      Name: !Sub "${EnvironmentName}-ITAdminGroupArn"
+
+  FacultyGroupArn:
+    Description: ARN of the Faculty IAM Group
+    Value: !GetAtt FacultyGroup.Arn
+    Export:
+      Name: !Sub "${EnvironmentName}-FacultyGroupArn"
+
+  StudentGroupArn:
+    Description: ARN of the Student IAM Group
+    Value: !GetAtt StudentGroup.Arn
+    Export:
+      Name: !Sub "${EnvironmentName}-StudentGroupArn"

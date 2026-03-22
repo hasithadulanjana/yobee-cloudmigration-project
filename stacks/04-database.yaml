@@ -1,0 +1,81 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Description: "Yobee Cloud Migration - RDS MySQL Database"
+
+Parameters:
+  EnvironmentName:
+    Type: String
+    Default: YobeeMigration
+
+  DBInstanceClass:
+    Type: String
+    Default: db.t3.micro
+
+  DBName:
+    Type: String
+    Default: yoobee_students
+
+  DBUsername:
+    Type: String
+    Default: dbadmin
+
+  DBPassword:
+    Type: String
+    NoEcho: true
+    MinLength: 12
+
+Resources:
+
+  RDSSubnetGroup:
+    Type: AWS::RDS::DBSubnetGroup
+    Properties:
+      DBSubnetGroupName: !Sub "${EnvironmentName}-RDS-SubnetGroup"
+      DBSubnetGroupDescription: "Private subnets for RDS"
+      SubnetIds:
+        - Fn::ImportValue: !Sub "${EnvironmentName}-PrivateSubnet1Id"
+        - Fn::ImportValue: !Sub "${EnvironmentName}-PrivateSubnet2Id"
+      Tags:
+        - Key: Project
+          Value: YobeeMigration
+
+  StudentDatabase:
+    Type: AWS::RDS::DBInstance
+    DeletionPolicy: Snapshot
+    Properties:
+      DBInstanceIdentifier: !Sub "${EnvironmentName}-student-db"
+      DBName: !Ref DBName
+      DBInstanceClass: !Ref DBInstanceClass
+      Engine: mysql
+      EngineVersion: "8.0"
+      MasterUsername: !Ref DBUsername
+      MasterUserPassword: !Ref DBPassword
+      AllocatedStorage: "20"
+      StorageType: gp2
+      StorageEncrypted: false
+      MultiAZ: false
+      DBSubnetGroupName: !Ref RDSSubnetGroup
+      VPCSecurityGroups:
+        - Fn::ImportValue: !Sub "${EnvironmentName}-RDSSecurityGroupId"
+      BackupRetentionPeriod: 0
+      DeletionProtection: false
+      EnableIAMDatabaseAuthentication: false
+      EnableCloudwatchLogsExports:
+        - error
+        - general
+        - slowquery
+      Tags:
+        - Key: Project
+          Value: YobeeMigration
+
+Outputs:
+
+  DBEndpoint:
+    Description: RDS MySQL endpoint address
+    Value: !GetAtt StudentDatabase.Endpoint.Address
+    Export:
+      Name: !Sub "${EnvironmentName}-DBEndpoint"
+
+  DBIdentifier:
+    Description: RDS DB instance identifier
+    Value: !Ref StudentDatabase
+    Export:
+      Name: !Sub "${EnvironmentName}-DBIdentifier"
