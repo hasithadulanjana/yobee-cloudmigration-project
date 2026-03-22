@@ -625,7 +625,7 @@ Resources:
 
   YoobeeS3Bucket:
     Type: AWS::S3::Bucket
-    DeletionPolicy: Retain       # Protect data on stack deletion
+    DeletionPolicy: Delete
     Properties:
       BucketName: !Sub "yoobee-lms-assets-${AWS::AccountId}"
       AccessControl: Private
@@ -694,7 +694,7 @@ Resources:
   # Separate bucket for access logs (log buckets cannot log to themselves)
   YoobeeAccessLogsBucket:
     Type: AWS::S3::Bucket
-    DeletionPolicy: Retain
+    DeletionPolicy: Delete
     Properties:
       BucketName: !Sub "yoobee-access-logs-${AWS::AccountId}"
       AccessControl: Private
