@@ -936,7 +936,7 @@ Resources:
       DBSubnetGroupName: !Ref RDSSubnetGroup
       VPCSecurityGroups:
         - !Ref RDSSecurityGroup
-      BackupRetentionPeriod: 7    # 7-day automated backups
+      BackupRetentionPeriod: 0    # Disabled for free tier (set to 1-7 for paid accounts)
       PreferredBackupWindow: "02:00-03:00"
       PreferredMaintenanceWindow: "sun:04:00-sun:05:00"
       EnableIAMDatabaseAuthentication: true
