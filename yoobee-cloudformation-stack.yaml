@@ -710,6 +710,21 @@ Resources:
             ExpirationInDays: 90
 
 
+  YoobeeAccessLogsBucketPolicy:
+    Type: AWS::S3::BucketPolicy
+    Properties:
+      Bucket: !Ref YoobeeAccessLogsBucket
+      PolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Sid: AllowELBAccessLogs
+            Effect: Allow
+            Principal:
+              AWS: "arn:aws:iam::783225319266:root"   # ELB service account for ap-southeast-2
+            Action: s3:PutObject
+            Resource: !Sub "arn:aws:s3:::yoobee-access-logs-${AWS::AccountId}/alb/AWSLogs/${AWS::AccountId}/*"
+
+
   # ----------------------------------------------------------
   # 5. EC2 INSTANCES (Task 3)
   #    LMS-1 & LMS-2: Linux (Amazon Linux 2) — Learning Management
