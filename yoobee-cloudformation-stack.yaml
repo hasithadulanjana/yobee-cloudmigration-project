@@ -929,19 +929,16 @@ Resources:
       MasterUsername: !Ref DBUsername
       MasterUserPassword: !Ref DBPassword
       AllocatedStorage: "20"
-      MaxAllocatedStorage: 100    # Storage autoscaling up to 100 GB
-      StorageType: gp3
-      StorageEncrypted: true      # Encryption at rest
-      MultiAZ: true               # High availability — automatic failover
+      StorageType: gp2
+      StorageEncrypted: false
+      MultiAZ: false
       DBSubnetGroupName: !Ref RDSSubnetGroup
       VPCSecurityGroups:
         - !Ref RDSSecurityGroup
-      BackupRetentionPeriod: 0    # Disabled for free tier (set to 1-7 for paid accounts)
-      PreferredBackupWindow: "02:00-03:00"
+      BackupRetentionPeriod: 0
       PreferredMaintenanceWindow: "sun:04:00-sun:05:00"
-      EnableIAMDatabaseAuthentication: true
-      DeletionProtection: true
-      MonitoringInterval: 60
+      EnableIAMDatabaseAuthentication: false
+      DeletionProtection: false
       EnableCloudwatchLogsExports:
         - error
         - general
