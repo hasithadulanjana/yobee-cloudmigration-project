@@ -48,7 +48,7 @@ Parameters:
 
   InstanceTypeApp:
     Type: String
-    Default: t3.medium
+    Default: t3.micro
     AllowedValues: [t3.micro, t3.small, t3.medium, t3.large]
     Description: EC2 instance type for LMS and Faculty servers.
 
