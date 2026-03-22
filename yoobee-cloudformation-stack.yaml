@@ -722,7 +722,7 @@ Resources:
             Principal:
               AWS: "arn:aws:iam::783225319266:root"   # ELB service account for ap-southeast-2
             Action: s3:PutObject
-            Resource: !Sub "arn:aws:s3:::yoobee-access-logs-${AWS::AccountId}/alb/AWSLogs/${AWS::AccountId}/*"
+            Resource: !Sub "arn:aws:s3:::yoobee-access-logs-${AWS::AccountId}/alb-access-logs/AWSLogs/${AWS::AccountId}/*"
 
 
   # ----------------------------------------------------------
@@ -1024,7 +1024,9 @@ Resources:
   # Application Load Balancer
   YoobeeALB:
     Type: AWS::ElasticLoadBalancingV2::LoadBalancer
-    DependsOn: InternetGatewayAttachment
+    DependsOn:
+      - InternetGatewayAttachment
+      - YoobeeAccessLogsBucketPolicy
     Properties:
       Name: !Sub "${EnvironmentName}-ALB"
       Scheme: internet-facing
