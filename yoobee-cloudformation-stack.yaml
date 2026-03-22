@@ -627,7 +627,7 @@ Resources:
     Type: AWS::S3::Bucket
     DeletionPolicy: Retain       # Protect data on stack deletion
     Properties:
-      BucketName: !Sub "${EnvironmentName}-lms-assets-${AWS::AccountId}"
+      BucketName: !Sub "yoobee-lms-assets-${AWS::AccountId}"
       AccessControl: Private
       VersioningConfiguration:
         Status: Enabled           # Protect against accidental deletion
@@ -696,7 +696,7 @@ Resources:
     Type: AWS::S3::Bucket
     DeletionPolicy: Retain
     Properties:
-      BucketName: !Sub "${EnvironmentName}-access-logs-${AWS::AccountId}"
+      BucketName: !Sub "yoobee-access-logs-${AWS::AccountId}"
       AccessControl: Private
       PublicAccessBlockConfiguration:
         BlockPublicAcls: true
