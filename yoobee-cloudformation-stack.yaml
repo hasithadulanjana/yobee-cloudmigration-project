@@ -1,0 +1,1502 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Description: >
+  Yoobee College of Creative Innovation - AWS Cloud Infrastructure Stack.
+  Covers: VPC, EC2 (Linux LMS x2, Windows Faculty x2), RDS (Student DB),
+  S3 Bucket, Application Load Balancer, Auto Scaling, IAM Roles,
+  Security Groups, CloudWatch Alarms, and SNS Alerts.
+
+# ============================================================
+# PARAMETERS
+# ============================================================
+Parameters:
+
+  EnvironmentName:
+    Type: String
+    Default: YoobeeCollege
+    Description: Prefix applied to all resource names.
+
+  VpcCIDR:
+    Type: String
+    Default: 10.0.0.0/16
+    Description: CIDR block for the Yoobee VPC.
+
+  PublicSubnet1CIDR:
+    Type: String
+    Default: 10.0.1.0/24
+
+  PublicSubnet2CIDR:
+    Type: String
+    Default: 10.0.2.0/24
+
+  PrivateSubnet1CIDR:
+    Type: String
+    Default: 10.0.11.0/24
+
+  PrivateSubnet2CIDR:
+    Type: String
+    Default: 10.0.12.0/24
+
+  LinuxAMI:
+    Type: AWS::SSM::Parameter::Value<AWS::EC2::Image::Id>
+    Default: /aws/service/ami-amazon-linux-latest/amzn2-ami-hvm-x86_64-gp2
+    Description: Latest Amazon Linux 2 AMI (auto-resolved via SSM).
+
+  WindowsAMI:
+    Type: AWS::SSM::Parameter::Value<AWS::EC2::Image::Id>
+    Default: /aws/service/ami-windows-latest/Windows_Server-2022-English-Full-Base
+    Description: Latest Windows Server 2022 AMI (auto-resolved via SSM).
+
+  InstanceTypeApp:
+    Type: String
+    Default: t3.medium
+    AllowedValues: [t3.micro, t3.small, t3.medium, t3.large]
+    Description: EC2 instance type for LMS and Faculty servers.
+
+  DBInstanceClass:
+    Type: String
+    Default: db.t3.micro
+    AllowedValues: [db.t3.micro, db.t3.small, db.t3.medium]
+    Description: RDS instance class for Student Database.
+
+  DBName:
+    Type: String
+    Default: yoobee_students
+    Description: Name of the student database.
+
+  DBUsername:
+    Type: String
+    Default: dbadmin
+    NoEcho: true
+    Description: RDS master username.
+
+  DBPassword:
+    Type: String
+    MinLength: 12
+    NoEcho: true
+    Description: RDS master password (min 12 chars, store in Secrets Manager in production).
+
+  KeyPairName:
+    Type: AWS::EC2::KeyPair::KeyName
+    Description: EC2 Key Pair for SSH/RDP access. Must exist in this region.
+
+  AdminEmail:
+    Type: String
+    Default: admin@yoobee.ac.nz
+    Description: Email for CloudWatch alarm notifications (SNS).
+
+  AllowedAdminCIDR:
+    Type: String
+    Default: 0.0.0.0/0
+    Description: >
+      CIDR allowed for SSH/RDP access. IMPORTANT: Restrict to your college IP
+      range in production (e.g., 203.0.113.0/24).
+
+
+# ============================================================
+# MAPPINGS
+# ============================================================
+Mappings:
+  # Reserved instance recommendation mapping for cost analysis reference
+  InstanceCostTier:
+    LMS:
+      PricingModel: Reserved-1Yr
+      Reason: Steady 24/7 workload - Reserved saves ~40% vs On-Demand
+    Faculty:
+      PricingModel: Reserved-1Yr
+      Reason: Business-hours heavy - Reserved is optimal
+    StudentDB:
+      PricingModel: Reserved-1Yr
+      Reason: Always-on DB - Reserved provides maximum savings
+
+
+# ============================================================
+# RESOURCES
+# ============================================================
+Resources:
+
+  # ----------------------------------------------------------
+  # 1. NETWORKING: VPC, Subnets, Gateways, Route Tables
+  # ----------------------------------------------------------
+
+  YoobeeVPC:
+    Type: AWS::EC2::VPC
+    Properties:
+      CidrBlock: !Ref VpcCIDR
+      EnableDnsSupport: true
+      EnableDnsHostnames: true
+      Tags:
+        - Key: Name
+          Value: !Sub "${EnvironmentName}-VPC"
+        - Key: Project
+          Value: YoobeeCollege
+
+  InternetGateway:
+    Type: AWS::EC2::InternetGateway
+    Properties:
+      Tags:
+        - Key: Name
+          Value: !Sub "${EnvironmentName}-IGW"
+
+  InternetGatewayAttachment:
+    Type: AWS::EC2::VPCGatewayAttachment
+    Properties:
+      VpcId: !Ref YoobeeVPC
+      InternetGatewayId: !Ref InternetGateway
+
+  # Public Subnets (ALB, NAT Gateway)
+  PublicSubnet1:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref YoobeeVPC
+      CidrBlock: !Ref PublicSubnet1CIDR
+      AvailabilityZone: !Select [0, !GetAZs ""]
+      MapPublicIpOnLaunch: true
+      Tags:
+        - Key: Name
+          Value: !Sub "${EnvironmentName}-Public-AZ1"
+
+  PublicSubnet2:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref YoobeeVPC
+      CidrBlock: !Ref PublicSubnet2CIDR
+      AvailabilityZone: !Select [1, !GetAZs ""]
+      MapPublicIpOnLaunch: true
+      Tags:
+        - Key: Name
+          Value: !Sub "${EnvironmentName}-Public-AZ2"
+
+  # Private Subnets (EC2 app servers, RDS)
+  PrivateSubnet1:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref YoobeeVPC
+      CidrBlock: !Ref PrivateSubnet1CIDR
+      AvailabilityZone: !Select [0, !GetAZs ""]
+      Tags:
+        - Key: Name
+          Value: !Sub "${EnvironmentName}-Private-AZ1"
+
+  PrivateSubnet2:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref YoobeeVPC
+      CidrBlock: !Ref PrivateSubnet2CIDR
+      AvailabilityZone: !Select [1, !GetAZs ""]
+      Tags:
+        - Key: Name
+          Value: !Sub "${EnvironmentName}-Private-AZ2"
+
+  # NAT Gateways (one per AZ for HA) — private instances can reach internet
+  NatGatewayEIP1:
+    Type: AWS::EC2::EIP
+    DependsOn: InternetGatewayAttachment
+    Properties:
+      Domain: vpc
+
+  NatGatewayEIP2:
+    Type: AWS::EC2::EIP
+    DependsOn: InternetGatewayAttachment
+    Properties:
+      Domain: vpc
+
+  NatGateway1:
+    Type: AWS::EC2::NatGateway
+    Properties:
+      AllocationId: !GetAtt NatGatewayEIP1.AllocationId
+      SubnetId: !Ref PublicSubnet1
+      Tags:
+        - Key: Name
+          Value: !Sub "${EnvironmentName}-NAT-AZ1"
+
+  NatGateway2:
+    Type: AWS::EC2::NatGateway
+    Properties:
+      AllocationId: !GetAtt NatGatewayEIP2.AllocationId
+      SubnetId: !Ref PublicSubnet2
+      Tags:
+        - Key: Name
+          Value: !Sub "${EnvironmentName}-NAT-AZ2"
+
+  # Route Tables
+  PublicRouteTable:
+    Type: AWS::EC2::RouteTable
+    Properties:
+      VpcId: !Ref YoobeeVPC
+      Tags:
+        - Key: Name
+          Value: !Sub "${EnvironmentName}-Public-RT"
+
+  DefaultPublicRoute:
+    Type: AWS::EC2::Route
+    DependsOn: InternetGatewayAttachment
+    Properties:
+      RouteTableId: !Ref PublicRouteTable
+      DestinationCidrBlock: 0.0.0.0/0
+      GatewayId: !Ref InternetGateway
+
+  PublicSubnet1RouteTableAssociation:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      SubnetId: !Ref PublicSubnet1
+      RouteTableId: !Ref PublicRouteTable
+
+  PublicSubnet2RouteTableAssociation:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      SubnetId: !Ref PublicSubnet2
+      RouteTableId: !Ref PublicRouteTable
+
+  PrivateRouteTable1:
+    Type: AWS::EC2::RouteTable
+    Properties:
+      VpcId: !Ref YoobeeVPC
+      Tags:
+        - Key: Name
+          Value: !Sub "${EnvironmentName}-Private-RT-AZ1"
+
+  DefaultPrivateRoute1:
+    Type: AWS::EC2::Route
+    Properties:
+      RouteTableId: !Ref PrivateRouteTable1
+      DestinationCidrBlock: 0.0.0.0/0
+      NatGatewayId: !Ref NatGateway1
+
+  PrivateSubnet1RouteTableAssociation:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      SubnetId: !Ref PrivateSubnet1
+      RouteTableId: !Ref PrivateRouteTable1
+
+  PrivateRouteTable2:
+    Type: AWS::EC2::RouteTable
+    Properties:
+      VpcId: !Ref YoobeeVPC
+      Tags:
+        - Key: Name
+          Value: !Sub "${EnvironmentName}-Private-RT-AZ2"
+
+  DefaultPrivateRoute2:
+    Type: AWS::EC2::Route
+    Properties:
+      RouteTableId: !Ref PrivateRouteTable2
+      DestinationCidrBlock: 0.0.0.0/0
+      NatGatewayId: !Ref NatGateway2
+
+  PrivateSubnet2RouteTableAssociation:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      SubnetId: !Ref PrivateSubnet2
+      RouteTableId: !Ref PrivateRouteTable2
+
+  # Network ACL — stateless layer of defence for private subnets
+  PrivateNetworkACL:
+    Type: AWS::EC2::NetworkAcl
+    Properties:
+      VpcId: !Ref YoobeeVPC
+      Tags:
+        - Key: Name
+          Value: !Sub "${EnvironmentName}-Private-NACL"
+
+  PrivateNACLInboundHTTPS:
+    Type: AWS::EC2::NetworkAclEntry
+    Properties:
+      NetworkAclId: !Ref PrivateNetworkACL
+      RuleNumber: 100
+      Protocol: 6        # TCP
+      RuleAction: allow
+      Egress: false
+      CidrBlock: !Ref VpcCIDR
+      PortRange:
+        From: 443
+        To: 443
+
+  PrivateNACLInboundHTTP:
+    Type: AWS::EC2::NetworkAclEntry
+    Properties:
+      NetworkAclId: !Ref PrivateNetworkACL
+      RuleNumber: 110
+      Protocol: 6
+      RuleAction: allow
+      Egress: false
+      CidrBlock: !Ref VpcCIDR
+      PortRange:
+        From: 80
+        To: 80
+
+  PrivateNACLInboundEphemeral:
+    Type: AWS::EC2::NetworkAclEntry
+    Properties:
+      NetworkAclId: !Ref PrivateNetworkACL
+      RuleNumber: 120
+      Protocol: 6
+      RuleAction: allow
+      Egress: false
+      CidrBlock: 0.0.0.0/0
+      PortRange:
+        From: 1024
+        To: 65535
+
+  PrivateNACLEgress:
+    Type: AWS::EC2::NetworkAclEntry
+    Properties:
+      NetworkAclId: !Ref PrivateNetworkACL
+      RuleNumber: 100
+      Protocol: -1
+      RuleAction: allow
+      Egress: true
+      CidrBlock: 0.0.0.0/0
+
+  PrivateSubnet1NACLAssociation:
+    Type: AWS::EC2::SubnetNetworkAclAssociation
+    Properties:
+      SubnetId: !Ref PrivateSubnet1
+      NetworkAclId: !Ref PrivateNetworkACL
+
+  PrivateSubnet2NACLAssociation:
+    Type: AWS::EC2::SubnetNetworkAclAssociation
+    Properties:
+      SubnetId: !Ref PrivateSubnet2
+      NetworkAclId: !Ref PrivateNetworkACL
+
+
+  # ----------------------------------------------------------
+  # 2. SECURITY GROUPS
+  # ----------------------------------------------------------
+
+  # ALB — accepts HTTPS from the internet
+  ALBSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupName: !Sub "${EnvironmentName}-ALB-SG"
+      GroupDescription: Allow HTTP/HTTPS from the internet to the ALB
+      VpcId: !Ref YoobeeVPC
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: 80
+          ToPort: 80
+          CidrIp: 0.0.0.0/0
+          Description: HTTP redirect
+        - IpProtocol: tcp
+          FromPort: 443
+          ToPort: 443
+          CidrIp: 0.0.0.0/0
+          Description: HTTPS from internet
+      SecurityGroupEgress:
+        - IpProtocol: -1
+          CidrIp: 0.0.0.0/0
+      Tags:
+        - Key: Name
+          Value: !Sub "${EnvironmentName}-ALB-SG"
+
+  # Linux LMS servers — traffic only from ALB
+  LMSSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupName: !Sub "${EnvironmentName}-LMS-SG"
+      GroupDescription: Allow HTTP from ALB and SSH from admin CIDR
+      VpcId: !Ref YoobeeVPC
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: 80
+          ToPort: 80
+          SourceSecurityGroupId: !Ref ALBSecurityGroup
+          Description: HTTP from ALB only
+        - IpProtocol: tcp
+          FromPort: 443
+          ToPort: 443
+          SourceSecurityGroupId: !Ref ALBSecurityGroup
+          Description: HTTPS from ALB only
+        - IpProtocol: tcp
+          FromPort: 22
+          ToPort: 22
+          CidrIp: !Ref AllowedAdminCIDR
+          Description: SSH admin access - restrict in production
+      SecurityGroupEgress:
+        - IpProtocol: -1
+          CidrIp: 0.0.0.0/0
+      Tags:
+        - Key: Name
+          Value: !Sub "${EnvironmentName}-LMS-SG"
+
+  # Windows Faculty Application servers
+  FacultyAppSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupName: !Sub "${EnvironmentName}-Faculty-SG"
+      GroupDescription: Allow HTTP from ALB and RDP from admin CIDR
+      VpcId: !Ref YoobeeVPC
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: 80
+          ToPort: 80
+          SourceSecurityGroupId: !Ref ALBSecurityGroup
+          Description: HTTP from ALB only
+        - IpProtocol: tcp
+          FromPort: 443
+          ToPort: 443
+          SourceSecurityGroupId: !Ref ALBSecurityGroup
+          Description: HTTPS from ALB only
+        - IpProtocol: tcp
+          FromPort: 3389
+          ToPort: 3389
+          CidrIp: !Ref AllowedAdminCIDR
+          Description: RDP admin access - restrict in production
+      SecurityGroupEgress:
+        - IpProtocol: -1
+          CidrIp: 0.0.0.0/0
+      Tags:
+        - Key: Name
+          Value: !Sub "${EnvironmentName}-Faculty-SG"
+
+  # RDS Student Database — only accessible from app servers
+  RDSSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupName: !Sub "${EnvironmentName}-RDS-SG"
+      GroupDescription: MySQL/Aurora from LMS and Faculty servers only
+      VpcId: !Ref YoobeeVPC
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: 3306
+          ToPort: 3306
+          SourceSecurityGroupId: !Ref LMSSecurityGroup
+          Description: MySQL from LMS servers
+        - IpProtocol: tcp
+          FromPort: 3306
+          ToPort: 3306
+          SourceSecurityGroupId: !Ref FacultyAppSecurityGroup
+          Description: MySQL from Faculty servers
+      SecurityGroupEgress:
+        - IpProtocol: -1
+          CidrIp: 0.0.0.0/0
+      Tags:
+        - Key: Name
+          Value: !Sub "${EnvironmentName}-RDS-SG"
+
+
+  # ----------------------------------------------------------
+  # 3. IAM ROLES AND POLICIES (Task 2 & 4)
+  # ----------------------------------------------------------
+
+  # EC2 instance role — SSM access + CloudWatch + S3 read
+  EC2InstanceRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub "${EnvironmentName}-EC2-InstanceRole"
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: ec2.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/CloudWatchAgentServerPolicy
+        - arn:aws:iam::aws:policy/AmazonSSMManagedInstanceCore  # Replaces SSH for day-to-day ops
+      Policies:
+        - PolicyName: S3ReadLMSContent
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Sid: AllowS3ReadLMS
+                Effect: Allow
+                Action:
+                  - s3:GetObject
+                  - s3:ListBucket
+                Resource:
+                  - !GetAtt YoobeeS3Bucket.Arn
+                  - !Sub "${YoobeeS3Bucket.Arn}/*"
+        - PolicyName: DenyS3PublicAccess
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Sid: DenyPutPublicACL
+                Effect: Deny
+                Action:
+                  - s3:PutBucketAcl
+                  - s3:PutObjectAcl
+                Resource: "*"
+      Tags:
+        - Key: Project
+          Value: YoobeeCollege
+
+  EC2InstanceProfile:
+    Type: AWS::IAM::InstanceProfile
+    Properties:
+      InstanceProfileName: !Sub "${EnvironmentName}-EC2-InstanceProfile"
+      Roles:
+        - !Ref EC2InstanceRole
+
+  # IAM Group: IT Administrators (full EC2/VPC/RDS management)
+  ITAdminGroup:
+    Type: AWS::IAM::Group
+    Properties:
+      GroupName: !Sub "${EnvironmentName}-ITAdmins"
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/AmazonEC2FullAccess
+        - arn:aws:iam::aws:policy/AmazonRDSFullAccess
+        - arn:aws:iam::aws:policy/AmazonVPCFullAccess
+        - arn:aws:iam::aws:policy/CloudWatchFullAccess
+      Policies:
+        - PolicyName: EnforceMFA
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Sid: DenyAllExceptListIfNoMFA
+                Effect: Deny
+                NotAction:
+                  - iam:CreateVirtualMFADevice
+                  - iam:EnableMFADevice
+                  - iam:GetUser
+                  - iam:ListMFADevices
+                  - iam:ListVirtualMFADevices
+                  - iam:ResyncMFADevice
+                  - sts:GetSessionToken
+                Resource: "*"
+                Condition:
+                  BoolIfExists:
+                    aws:MultiFactorAuthPresent: "false"
+
+  # IAM Group: Faculty — read-only to their app, no DB
+  FacultyGroup:
+    Type: AWS::IAM::Group
+    Properties:
+      GroupName: !Sub "${EnvironmentName}-Faculty"
+      Policies:
+        - PolicyName: FacultyReadOnly
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Sid: AllowEC2ReadOnly
+                Effect: Allow
+                Action:
+                  - ec2:Describe*
+                  - s3:GetObject
+                  - s3:ListBucket
+                Resource: "*"
+              - Sid: DenyRDSAccess
+                Effect: Deny
+                Action: rds:*
+                Resource: "*"
+
+  # IAM Group: Students — S3 read-only for course materials
+  StudentGroup:
+    Type: AWS::IAM::Group
+    Properties:
+      GroupName: !Sub "${EnvironmentName}-Students"
+      Policies:
+        - PolicyName: StudentS3ReadOnly
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Sid: AllowS3ReadCourseMaterials
+                Effect: Allow
+                Action:
+                  - s3:GetObject
+                Resource: !Sub "${YoobeeS3Bucket.Arn}/course-materials/*"
+              - Sid: DenyAllOther
+                Effect: Deny
+                Action:
+                  - ec2:*
+                  - rds:*
+                  - iam:*
+                Resource: "*"
+
+  # Service role for Auto Scaling
+  AutoScalingServiceRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub "${EnvironmentName}-AutoScaling-Role"
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: application-autoscaling.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AmazonEC2RoleforAWSCodeDeploy
+
+
+  # ----------------------------------------------------------
+  # 4. S3 BUCKET — Course Materials & LMS Assets (Task 3)
+  # ----------------------------------------------------------
+
+  YoobeeS3Bucket:
+    Type: AWS::S3::Bucket
+    DeletionPolicy: Retain       # Protect data on stack deletion
+    Properties:
+      BucketName: !Sub "${EnvironmentName}-lms-assets-${AWS::AccountId}"
+      AccessControl: Private
+      VersioningConfiguration:
+        Status: Enabled           # Protect against accidental deletion
+      BucketEncryption:
+        ServerSideEncryptionConfiguration:
+          - ServerSideEncryptionByDefault:
+              SSEAlgorithm: AES256
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
+      LifecycleConfiguration:
+        Rules:
+          - Id: ArchiveOldVersions
+            Status: Enabled
+            NoncurrentVersionTransitions:
+              - TransitionInDays: 90
+                StorageClass: STANDARD_IA
+            NoncurrentVersionExpirationInDays: 365
+      LoggingConfiguration:
+        DestinationBucketName: !Ref YoobeeAccessLogsBucket
+        LogFilePrefix: s3-access-logs/
+      CorsConfiguration:
+        CorsRules:
+          - AllowedHeaders: ["*"]
+            AllowedMethods: [GET]
+            AllowedOrigins: ["https://*.yoobee.ac.nz"]
+            MaxAge: 3000
+      Tags:
+        - Key: Name
+          Value: !Sub "${EnvironmentName}-LMS-Assets"
+        - Key: DataClassification
+          Value: Internal
+
+  YoobeeS3BucketPolicy:
+    Type: AWS::S3::BucketPolicy
+    Properties:
+      Bucket: !Ref YoobeeS3Bucket
+      PolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Sid: DenyNonSSL
+            Effect: Deny
+            Principal: "*"
+            Action: s3:*
+            Resource:
+              - !GetAtt YoobeeS3Bucket.Arn
+              - !Sub "${YoobeeS3Bucket.Arn}/*"
+            Condition:
+              Bool:
+                aws:SecureTransport: "false"
+          - Sid: AllowEC2RoleAccess
+            Effect: Allow
+            Principal:
+              AWS: !GetAtt EC2InstanceRole.Arn
+            Action:
+              - s3:GetObject
+              - s3:ListBucket
+            Resource:
+              - !GetAtt YoobeeS3Bucket.Arn
+              - !Sub "${YoobeeS3Bucket.Arn}/*"
+
+  # Separate bucket for access logs (log buckets cannot log to themselves)
+  YoobeeAccessLogsBucket:
+    Type: AWS::S3::Bucket
+    DeletionPolicy: Retain
+    Properties:
+      BucketName: !Sub "${EnvironmentName}-access-logs-${AWS::AccountId}"
+      AccessControl: Private
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
+      LifecycleConfiguration:
+        Rules:
+          - Id: DeleteOldLogs
+            Status: Enabled
+            ExpirationInDays: 90
+
+
+  # ----------------------------------------------------------
+  # 5. EC2 INSTANCES (Task 3)
+  #    LMS-1 & LMS-2: Linux (Amazon Linux 2) — Learning Management
+  #    Faculty-1 & Faculty-2: Windows Server 2022 — Staff Applications
+  # ----------------------------------------------------------
+
+  # ----- LMS Server 1 (Linux) -----
+  LMSServer1:
+    Type: AWS::EC2::Instance
+    Properties:
+      ImageId: !Ref LinuxAMI
+      InstanceType: !Ref InstanceTypeApp
+      KeyName: !Ref KeyPairName
+      IamInstanceProfile: !Ref EC2InstanceProfile
+      SubnetId: !Ref PrivateSubnet1
+      SecurityGroupIds:
+        - !Ref LMSSecurityGroup
+      BlockDeviceMappings:
+        - DeviceName: /dev/xvda
+          Ebs:
+            VolumeSize: 50
+            VolumeType: gp3
+            Encrypted: true    # Encryption at rest
+            DeleteOnTermination: true
+      UserData:
+        Fn::Base64: !Sub |
+          #!/bin/bash
+          set -e
+          yum update -y
+          yum install -y amazon-cloudwatch-agent httpd php php-mysqlnd
+          # Install Moodle prerequisites (LMS)
+          amazon-linux-extras install php7.4 -y
+          systemctl enable httpd
+          systemctl start httpd
+          # CloudWatch Agent config
+          /opt/aws/amazon-cloudwatch-agent/bin/amazon-cloudwatch-agent-ctl \
+            -a fetch-config -m ec2 -s -c ssm:/AmazonCloudWatch-config
+          # Tag instance for identification
+          INSTANCE_ID=$(curl -s http://169.254.169.254/latest/meta-data/instance-id)
+          aws ec2 create-tags --region ${AWS::Region} \
+            --resources $INSTANCE_ID \
+            --tags Key=Name,Value=${EnvironmentName}-LMS-1 \
+                   Key=Role,Value=LMS \
+                   Key=Project,Value=YoobeeCollege
+      Tags:
+        - Key: Name
+          Value: !Sub "${EnvironmentName}-LMS-1"
+        - Key: Role
+          Value: LMS
+        - Key: OS
+          Value: Linux
+        - Key: PricingModel
+          Value: Reserved-1Yr
+
+  # ----- LMS Server 2 (Linux) — different AZ for HA -----
+  LMSServer2:
+    Type: AWS::EC2::Instance
+    Properties:
+      ImageId: !Ref LinuxAMI
+      InstanceType: !Ref InstanceTypeApp
+      KeyName: !Ref KeyPairName
+      IamInstanceProfile: !Ref EC2InstanceProfile
+      SubnetId: !Ref PrivateSubnet2
+      SecurityGroupIds:
+        - !Ref LMSSecurityGroup
+      BlockDeviceMappings:
+        - DeviceName: /dev/xvda
+          Ebs:
+            VolumeSize: 50
+            VolumeType: gp3
+            Encrypted: true
+            DeleteOnTermination: true
+      UserData:
+        Fn::Base64: !Sub |
+          #!/bin/bash
+          set -e
+          yum update -y
+          yum install -y amazon-cloudwatch-agent httpd php php-mysqlnd
+          amazon-linux-extras install php7.4 -y
+          systemctl enable httpd
+          systemctl start httpd
+          /opt/aws/amazon-cloudwatch-agent/bin/amazon-cloudwatch-agent-ctl \
+            -a fetch-config -m ec2 -s -c ssm:/AmazonCloudWatch-config
+          INSTANCE_ID=$(curl -s http://169.254.169.254/latest/meta-data/instance-id)
+          aws ec2 create-tags --region ${AWS::Region} \
+            --resources $INSTANCE_ID \
+            --tags Key=Name,Value=${EnvironmentName}-LMS-2 \
+                   Key=Role,Value=LMS \
+                   Key=Project,Value=YoobeeCollege
+      Tags:
+        - Key: Name
+          Value: !Sub "${EnvironmentName}-LMS-2"
+        - Key: Role
+          Value: LMS
+        - Key: OS
+          Value: Linux
+        - Key: PricingModel
+          Value: Reserved-1Yr
+
+  # ----- Faculty App Server 1 (Windows) -----
+  FacultyServer1:
+    Type: AWS::EC2::Instance
+    Properties:
+      ImageId: !Ref WindowsAMI
+      InstanceType: !Ref InstanceTypeApp
+      KeyName: !Ref KeyPairName
+      IamInstanceProfile: !Ref EC2InstanceProfile
+      SubnetId: !Ref PrivateSubnet1
+      SecurityGroupIds:
+        - !Ref FacultyAppSecurityGroup
+      BlockDeviceMappings:
+        - DeviceName: /dev/sda1
+          Ebs:
+            VolumeSize: 80
+            VolumeType: gp3
+            Encrypted: true
+            DeleteOnTermination: true
+      UserData:
+        Fn::Base64: !Sub |
+          <powershell>
+          # Install IIS for faculty web application
+          Install-WindowsFeature -Name Web-Server -IncludeManagementTools
+          Install-WindowsFeature -Name Web-Asp-Net45
+          # Install CloudWatch Agent
+          $cwAgentUrl = "https://s3.amazonaws.com/amazoncloudwatch-agent/windows/amd64/latest/amazon-cloudwatch-agent.msi"
+          $cwAgentInstaller = "$env:TEMP\amazon-cloudwatch-agent.msi"
+          Invoke-WebRequest -Uri $cwAgentUrl -OutFile $cwAgentInstaller
+          Start-Process msiexec.exe -ArgumentList "/i $cwAgentInstaller /quiet" -Wait
+          # Tag the instance
+          $instanceId = (Invoke-WebRequest -Uri "http://169.254.169.254/latest/meta-data/instance-id").Content
+          $region = "${AWS::Region}"
+          & "C:\Program Files\Amazon\AWSCLIV2\aws.exe" ec2 create-tags `
+            --region $region `
+            --resources $instanceId `
+            --tags Key=Name,Value=${EnvironmentName}-Faculty-1 Key=Role,Value=FacultyApp Key=Project,Value=YoobeeCollege
+          </powershell>
+      Tags:
+        - Key: Name
+          Value: !Sub "${EnvironmentName}-Faculty-1"
+        - Key: Role
+          Value: FacultyApp
+        - Key: OS
+          Value: Windows
+        - Key: PricingModel
+          Value: Reserved-1Yr
+
+  # ----- Faculty App Server 2 (Windows) — different AZ for HA -----
+  FacultyServer2:
+    Type: AWS::EC2::Instance
+    Properties:
+      ImageId: !Ref WindowsAMI
+      InstanceType: !Ref InstanceTypeApp
+      KeyName: !Ref KeyPairName
+      IamInstanceProfile: !Ref EC2InstanceProfile
+      SubnetId: !Ref PrivateSubnet2
+      SecurityGroupIds:
+        - !Ref FacultyAppSecurityGroup
+      BlockDeviceMappings:
+        - DeviceName: /dev/sda1
+          Ebs:
+            VolumeSize: 80
+            VolumeType: gp3
+            Encrypted: true
+            DeleteOnTermination: true
+      UserData:
+        Fn::Base64: !Sub |
+          <powershell>
+          Install-WindowsFeature -Name Web-Server -IncludeManagementTools
+          Install-WindowsFeature -Name Web-Asp-Net45
+          $cwAgentUrl = "https://s3.amazonaws.com/amazoncloudwatch-agent/windows/amd64/latest/amazon-cloudwatch-agent.msi"
+          $cwAgentInstaller = "$env:TEMP\amazon-cloudwatch-agent.msi"
+          Invoke-WebRequest -Uri $cwAgentUrl -OutFile $cwAgentInstaller
+          Start-Process msiexec.exe -ArgumentList "/i $cwAgentInstaller /quiet" -Wait
+          $instanceId = (Invoke-WebRequest -Uri "http://169.254.169.254/latest/meta-data/instance-id").Content
+          $region = "${AWS::Region}"
+          & "C:\Program Files\Amazon\AWSCLIV2\aws.exe" ec2 create-tags `
+            --region $region `
+            --resources $instanceId `
+            --tags Key=Name,Value=${EnvironmentName}-Faculty-2 Key=Role,Value=FacultyApp Key=Project,Value=YoobeeCollege
+          </powershell>
+      Tags:
+        - Key: Name
+          Value: !Sub "${EnvironmentName}-Faculty-2"
+        - Key: Role
+          Value: FacultyApp
+        - Key: OS
+          Value: Windows
+        - Key: PricingModel
+          Value: Reserved-1Yr
+
+
+  # ----------------------------------------------------------
+  # 6. RDS — Student Database (Task 2, MySQL Multi-AZ)
+  # ----------------------------------------------------------
+
+  RDSSubnetGroup:
+    Type: AWS::RDS::DBSubnetGroup
+    Properties:
+      DBSubnetGroupName: !Sub "${EnvironmentName}-RDS-SubnetGroup"
+      DBSubnetGroupDescription: Private subnets for RDS Student DB
+      SubnetIds:
+        - !Ref PrivateSubnet1
+        - !Ref PrivateSubnet2
+      Tags:
+        - Key: Name
+          Value: !Sub "${EnvironmentName}-RDS-SubnetGroup"
+
+  StudentDatabase:
+    Type: AWS::RDS::DBInstance
+    DeletionPolicy: Snapshot      # Take final snapshot on deletion
+    Properties:
+      DBInstanceIdentifier: !Sub "${EnvironmentName}-student-db"
+      DBName: !Ref DBName
+      DBInstanceClass: !Ref DBInstanceClass
+      Engine: mysql
+      EngineVersion: "8.0"
+      MasterUsername: !Ref DBUsername
+      MasterUserPassword: !Ref DBPassword
+      AllocatedStorage: "20"
+      MaxAllocatedStorage: 100    # Storage autoscaling up to 100 GB
+      StorageType: gp3
+      StorageEncrypted: true      # Encryption at rest
+      MultiAZ: true               # High availability — automatic failover
+      DBSubnetGroupName: !Ref RDSSubnetGroup
+      VPCSecurityGroups:
+        - !Ref RDSSecurityGroup
+      BackupRetentionPeriod: 7    # 7-day automated backups
+      PreferredBackupWindow: "02:00-03:00"
+      PreferredMaintenanceWindow: "sun:04:00-sun:05:00"
+      EnableIAMDatabaseAuthentication: true
+      DeletionProtection: true
+      MonitoringInterval: 60
+      EnableCloudwatchLogsExports:
+        - error
+        - general
+        - slowquery
+      Tags:
+        - Key: Name
+          Value: !Sub "${EnvironmentName}-StudentDB"
+        - Key: DataClassification
+          Value: Confidential
+        - Key: PricingModel
+          Value: Reserved-1Yr
+
+
+  # ----------------------------------------------------------
+  # 7. APPLICATION LOAD BALANCER + TARGET GROUPS (Task 3)
+  # ----------------------------------------------------------
+
+  # Target Group: LMS Linux servers
+  LMSTargetGroup:
+    Type: AWS::ElasticLoadBalancingV2::TargetGroup
+    Properties:
+      Name: !Sub "${EnvironmentName}-LMS-TG"
+      VpcId: !Ref YoobeeVPC
+      Port: 80
+      Protocol: HTTP
+      TargetType: instance
+      HealthCheckEnabled: true
+      HealthCheckPath: /health
+      HealthCheckIntervalSeconds: 30
+      HealthCheckTimeoutSeconds: 10
+      HealthyThresholdCount: 2
+      UnhealthyThresholdCount: 3
+      Matcher:
+        HttpCode: "200"
+      Targets:
+        - Id: !Ref LMSServer1
+          Port: 80
+        - Id: !Ref LMSServer2
+          Port: 80
+      Tags:
+        - Key: Name
+          Value: !Sub "${EnvironmentName}-LMS-TG"
+
+  # Target Group: Faculty Windows servers
+  FacultyTargetGroup:
+    Type: AWS::ElasticLoadBalancingV2::TargetGroup
+    Properties:
+      Name: !Sub "${EnvironmentName}-Faculty-TG"
+      VpcId: !Ref YoobeeVPC
+      Port: 80
+      Protocol: HTTP
+      TargetType: instance
+      HealthCheckEnabled: true
+      HealthCheckPath: /
+      HealthCheckIntervalSeconds: 30
+      HealthCheckTimeoutSeconds: 10
+      HealthyThresholdCount: 2
+      UnhealthyThresholdCount: 3
+      Targets:
+        - Id: !Ref FacultyServer1
+          Port: 80
+        - Id: !Ref FacultyServer2
+          Port: 80
+      Tags:
+        - Key: Name
+          Value: !Sub "${EnvironmentName}-Faculty-TG"
+
+  # Application Load Balancer
+  YoobeeALB:
+    Type: AWS::ElasticLoadBalancingV2::LoadBalancer
+    DependsOn: InternetGatewayAttachment
+    Properties:
+      Name: !Sub "${EnvironmentName}-ALB"
+      Scheme: internet-facing
+      Type: application
+      Subnets:
+        - !Ref PublicSubnet1
+        - !Ref PublicSubnet2
+      SecurityGroups:
+        - !Ref ALBSecurityGroup
+      LoadBalancerAttributes:
+        - Key: deletion_protection.enabled
+          Value: "true"
+        - Key: access_logs.s3.enabled
+          Value: "true"
+        - Key: access_logs.s3.bucket
+          Value: !Ref YoobeeAccessLogsBucket
+        - Key: access_logs.s3.prefix
+          Value: alb-access-logs
+      Tags:
+        - Key: Name
+          Value: !Sub "${EnvironmentName}-ALB"
+
+  # HTTPS Listener (port 443) with path-based routing
+  ALBHTTPSListener:
+    Type: AWS::ElasticLoadBalancingV2::Listener
+    Properties:
+      LoadBalancerArn: !Ref YoobeeALB
+      Port: 443
+      Protocol: HTTPS
+      # NOTE: Replace with a real ACM certificate ARN before deploying
+      Certificates:
+        - CertificateArn: !Sub "arn:aws:acm:${AWS::Region}:${AWS::AccountId}:certificate/REPLACE-WITH-ACM-CERT-ARN"
+      DefaultActions:
+        - Type: forward
+          TargetGroupArn: !Ref LMSTargetGroup
+      SslPolicy: ELBSecurityPolicy-TLS13-1-2-2021-06
+
+  # Redirect HTTP → HTTPS
+  ALBHTTPListener:
+    Type: AWS::ElasticLoadBalancingV2::Listener
+    Properties:
+      LoadBalancerArn: !Ref YoobeeALB
+      Port: 80
+      Protocol: HTTP
+      DefaultActions:
+        - Type: redirect
+          RedirectConfig:
+            Protocol: HTTPS
+            Port: "443"
+            StatusCode: HTTP_301
+
+  # Path-based rule: /faculty/* → Faculty Target Group
+  FacultyListenerRule:
+    Type: AWS::ElasticLoadBalancingV2::ListenerRule
+    Properties:
+      ListenerArn: !Ref ALBHTTPSListener
+      Priority: 10
+      Conditions:
+        - Field: path-pattern
+          Values:
+            - /faculty/*
+      Actions:
+        - Type: forward
+          TargetGroupArn: !Ref FacultyTargetGroup
+
+
+  # ----------------------------------------------------------
+  # 8. AUTO SCALING GROUP (Task 1 & 3 — scalability requirement)
+  #    Uses a Launch Template for LMS servers; scales on CPU
+  # ----------------------------------------------------------
+
+  LMSLaunchTemplate:
+    Type: AWS::EC2::LaunchTemplate
+    Properties:
+      LaunchTemplateName: !Sub "${EnvironmentName}-LMS-LaunchTemplate"
+      LaunchTemplateData:
+        ImageId: !Ref LinuxAMI
+        InstanceType: !Ref InstanceTypeApp
+        KeyName: !Ref KeyPairName
+        IamInstanceProfile:
+          Arn: !GetAtt EC2InstanceProfile.Arn
+        SecurityGroupIds:
+          - !Ref LMSSecurityGroup
+        BlockDeviceMappings:
+          - DeviceName: /dev/xvda
+            Ebs:
+              VolumeSize: 50
+              VolumeType: gp3
+              Encrypted: true
+              DeleteOnTermination: true
+        UserData:
+          Fn::Base64: !Sub |
+            #!/bin/bash
+            set -e
+            yum update -y
+            yum install -y amazon-cloudwatch-agent httpd php php-mysqlnd
+            amazon-linux-extras install php7.4 -y
+            systemctl enable httpd
+            systemctl start httpd
+        TagSpecifications:
+          - ResourceType: instance
+            Tags:
+              - Key: Name
+                Value: !Sub "${EnvironmentName}-LMS-ASG"
+              - Key: Role
+                Value: LMS
+              - Key: Project
+                Value: YoobeeCollege
+
+  LMSAutoScalingGroup:
+    Type: AWS::AutoScaling::AutoScalingGroup
+    Properties:
+      AutoScalingGroupName: !Sub "${EnvironmentName}-LMS-ASG"
+      LaunchTemplate:
+        LaunchTemplateId: !Ref LMSLaunchTemplate
+        Version: !GetAtt LMSLaunchTemplate.LatestVersionNumber
+      MinSize: "2"              # Always at least 2 for HA
+      MaxSize: "6"              # Scale up to 6 during peak enrolment
+      DesiredCapacity: "2"
+      VPCZoneIdentifier:
+        - !Ref PrivateSubnet1
+        - !Ref PrivateSubnet2
+      TargetGroupARNs:
+        - !Ref LMSTargetGroup
+      HealthCheckType: ELB
+      HealthCheckGracePeriod: 300
+      MetricsCollection:
+        - Granularity: 1Minute
+          Metrics:
+            - GroupMinSize
+            - GroupMaxSize
+            - GroupDesiredCapacity
+            - GroupInServiceInstances
+            - GroupPendingInstances
+            - GroupTerminatingInstances
+            - GroupTotalInstances
+      Tags:
+        - Key: Name
+          Value: !Sub "${EnvironmentName}-LMS-ASG"
+          PropagateAtLaunch: true
+        - Key: Project
+          Value: YoobeeCollege
+          PropagateAtLaunch: true
+
+  # Scale OUT when CPU > 70% for 2 consecutive periods
+  LMSScaleOutPolicy:
+    Type: AWS::AutoScaling::ScalingPolicy
+    Properties:
+      AutoScalingGroupName: !Ref LMSAutoScalingGroup
+      PolicyType: TargetTrackingScaling
+      TargetTrackingConfiguration:
+        PredefinedMetricSpecification:
+          PredefinedMetricType: ASGAverageCPUUtilization
+        TargetValue: 70.0
+        DisableScaleIn: false
+
+
+  # ----------------------------------------------------------
+  # 9. SNS TOPIC — CloudWatch Alarm Notifications (Task 4)
+  # ----------------------------------------------------------
+
+  YoobeeAlarmTopic:
+    Type: AWS::SNS::Topic
+    Properties:
+      TopicName: !Sub "${EnvironmentName}-Alarms"
+      Subscription:
+        - Endpoint: !Ref AdminEmail
+          Protocol: email
+      Tags:
+        - Key: Project
+          Value: YoobeeCollege
+
+
+  # ----------------------------------------------------------
+  # 10. CLOUDWATCH ALARMS (Task 4)
+  # ----------------------------------------------------------
+
+  # --- LMS Server 1 ---
+  LMS1CPUAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: !Sub "${EnvironmentName}-LMS1-HighCPU"
+      AlarmDescription: LMS Server 1 CPU utilization above 80%
+      Namespace: AWS/EC2
+      MetricName: CPUUtilization
+      Dimensions:
+        - Name: InstanceId
+          Value: !Ref LMSServer1
+      Statistic: Average
+      Period: 300
+      EvaluationPeriods: 2
+      Threshold: 80
+      ComparisonOperator: GreaterThanThreshold
+      TreatMissingData: notBreaching
+      AlarmActions:
+        - !Ref YoobeeAlarmTopic
+      OKActions:
+        - !Ref YoobeeAlarmTopic
+
+  LMS1StatusCheckAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: !Sub "${EnvironmentName}-LMS1-StatusCheck"
+      AlarmDescription: LMS Server 1 status check failed
+      Namespace: AWS/EC2
+      MetricName: StatusCheckFailed
+      Dimensions:
+        - Name: InstanceId
+          Value: !Ref LMSServer1
+      Statistic: Maximum
+      Period: 60
+      EvaluationPeriods: 2
+      Threshold: 1
+      ComparisonOperator: GreaterThanOrEqualToThreshold
+      AlarmActions:
+        - !Ref YoobeeAlarmTopic
+
+  # --- LMS Server 2 ---
+  LMS2CPUAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: !Sub "${EnvironmentName}-LMS2-HighCPU"
+      AlarmDescription: LMS Server 2 CPU utilization above 80%
+      Namespace: AWS/EC2
+      MetricName: CPUUtilization
+      Dimensions:
+        - Name: InstanceId
+          Value: !Ref LMSServer2
+      Statistic: Average
+      Period: 300
+      EvaluationPeriods: 2
+      Threshold: 80
+      ComparisonOperator: GreaterThanThreshold
+      TreatMissingData: notBreaching
+      AlarmActions:
+        - !Ref YoobeeAlarmTopic
+
+  # --- Faculty Server 1 ---
+  Faculty1CPUAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: !Sub "${EnvironmentName}-Faculty1-HighCPU"
+      AlarmDescription: Faculty App Server 1 CPU utilization above 80%
+      Namespace: AWS/EC2
+      MetricName: CPUUtilization
+      Dimensions:
+        - Name: InstanceId
+          Value: !Ref FacultyServer1
+      Statistic: Average
+      Period: 300
+      EvaluationPeriods: 2
+      Threshold: 80
+      ComparisonOperator: GreaterThanThreshold
+      TreatMissingData: notBreaching
+      AlarmActions:
+        - !Ref YoobeeAlarmTopic
+
+  # --- Faculty Server 2 ---
+  Faculty2CPUAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: !Sub "${EnvironmentName}-Faculty2-HighCPU"
+      AlarmDescription: Faculty App Server 2 CPU utilization above 80%
+      Namespace: AWS/EC2
+      MetricName: CPUUtilization
+      Dimensions:
+        - Name: InstanceId
+          Value: !Ref FacultyServer2
+      Statistic: Average
+      Period: 300
+      EvaluationPeriods: 2
+      Threshold: 80
+      ComparisonOperator: GreaterThanThreshold
+      TreatMissingData: notBreaching
+      AlarmActions:
+        - !Ref YoobeeAlarmTopic
+
+  # --- RDS High Connection Count ---
+  RDSConnectionAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: !Sub "${EnvironmentName}-RDS-HighConnections"
+      AlarmDescription: RDS Student DB connection count above 80
+      Namespace: AWS/RDS
+      MetricName: DatabaseConnections
+      Dimensions:
+        - Name: DBInstanceIdentifier
+          Value: !Ref StudentDatabase
+      Statistic: Average
+      Period: 300
+      EvaluationPeriods: 2
+      Threshold: 80
+      ComparisonOperator: GreaterThanThreshold
+      AlarmActions:
+        - !Ref YoobeeAlarmTopic
+
+  RDSStorageAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: !Sub "${EnvironmentName}-RDS-LowStorage"
+      AlarmDescription: RDS Student DB free storage below 5 GB
+      Namespace: AWS/RDS
+      MetricName: FreeStorageSpace
+      Dimensions:
+        - Name: DBInstanceIdentifier
+          Value: !Ref StudentDatabase
+      Statistic: Average
+      Period: 300
+      EvaluationPeriods: 1
+      Threshold: 5368709120   # 5 GB in bytes
+      ComparisonOperator: LessThanThreshold
+      AlarmActions:
+        - !Ref YoobeeAlarmTopic
+
+  # --- ALB 5XX Error Rate ---
+  ALB5xxAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: !Sub "${EnvironmentName}-ALB-5xxErrors"
+      AlarmDescription: ALB returning elevated 5xx errors
+      Namespace: AWS/ApplicationELB
+      MetricName: HTTPCode_ELB_5XX_Count
+      Dimensions:
+        - Name: LoadBalancer
+          Value: !GetAtt YoobeeALB.LoadBalancerFullName
+      Statistic: Sum
+      Period: 300
+      EvaluationPeriods: 1
+      Threshold: 10
+      ComparisonOperator: GreaterThanThreshold
+      TreatMissingData: notBreaching
+      AlarmActions:
+        - !Ref YoobeeAlarmTopic
+
+  # CloudWatch Dashboard
+  YoobeeDashboard:
+    Type: AWS::CloudWatch::Dashboard
+    Properties:
+      DashboardName: !Sub "${EnvironmentName}-Infrastructure"
+      DashboardBody: !Sub |
+        {
+          "widgets": [
+            {
+              "type": "metric",
+              "x": 0, "y": 0, "width": 12, "height": 6,
+              "properties": {
+                "title": "EC2 CPU Utilization - All Servers",
+                "metrics": [
+                  ["AWS/EC2","CPUUtilization","InstanceId","${LMSServer1}",{"label":"LMS-1"}],
+                  ["AWS/EC2","CPUUtilization","InstanceId","${LMSServer2}",{"label":"LMS-2"}],
+                  ["AWS/EC2","CPUUtilization","InstanceId","${FacultyServer1}",{"label":"Faculty-1"}],
+                  ["AWS/EC2","CPUUtilization","InstanceId","${FacultyServer2}",{"label":"Faculty-2"}]
+                ],
+                "period": 300,
+                "stat": "Average",
+                "view": "timeSeries",
+                "yAxis": {"left": {"min": 0, "max": 100}},
+                "annotations": {
+                  "horizontal": [{"value": 80, "color": "#ff0000", "label": "Alarm threshold"}]
+                }
+              }
+            },
+            {
+              "type": "metric",
+              "x": 12, "y": 0, "width": 12, "height": 6,
+              "properties": {
+                "title": "RDS - Connections & Storage",
+                "metrics": [
+                  ["AWS/RDS","DatabaseConnections","DBInstanceIdentifier","${EnvironmentName}-student-db"],
+                  ["AWS/RDS","FreeStorageSpace","DBInstanceIdentifier","${EnvironmentName}-student-db",{"yAxis":"right"}]
+                ],
+                "period": 300,
+                "stat": "Average",
+                "view": "timeSeries"
+              }
+            },
+            {
+              "type": "metric",
+              "x": 0, "y": 6, "width": 12, "height": 6,
+              "properties": {
+                "title": "ALB - Request Count & 5xx Errors",
+                "metrics": [
+                  ["AWS/ApplicationELB","RequestCount","LoadBalancer","${YoobeeALB.LoadBalancerFullName}"],
+                  ["AWS/ApplicationELB","HTTPCode_ELB_5XX_Count","LoadBalancer","${YoobeeALB.LoadBalancerFullName}",{"color":"#ff0000"}]
+                ],
+                "period": 60,
+                "stat": "Sum",
+                "view": "timeSeries"
+              }
+            },
+            {
+              "type": "metric",
+              "x": 12, "y": 6, "width": 12, "height": 6,
+              "properties": {
+                "title": "Auto Scaling Group - Instance Count",
+                "metrics": [
+                  ["AWS/AutoScaling","GroupInServiceInstances","AutoScalingGroupName","${EnvironmentName}-LMS-ASG"]
+                ],
+                "period": 60,
+                "stat": "Average",
+                "view": "timeSeries"
+              }
+            }
+          ]
+        }
+
+
+# ============================================================
+# OUTPUTS
+# ============================================================
+Outputs:
+
+  VPCId:
+    Description: VPC ID
+    Value: !Ref YoobeeVPC
+    Export:
+      Name: !Sub "${EnvironmentName}-VPC-ID"
+
+  ALBDNSName:
+    Description: DNS name for the Application Load Balancer
+    Value: !GetAtt YoobeeALB.DNSName
+    Export:
+      Name: !Sub "${EnvironmentName}-ALB-DNS"
+
+  ALBHostedZoneID:
+    Description: Hosted Zone ID for ALB (used for Route 53 alias records)
+    Value: !GetAtt YoobeeALB.CanonicalHostedZoneID
+
+  LMSServer1Id:
+    Description: Instance ID of LMS Server 1 (Linux)
+    Value: !Ref LMSServer1
+
+  LMSServer2Id:
+    Description: Instance ID of LMS Server 2 (Linux)
+    Value: !Ref LMSServer2
+
+  FacultyServer1Id:
+    Description: Instance ID of Faculty App Server 1 (Windows)
+    Value: !Ref FacultyServer1
+
+  FacultyServer2Id:
+    Description: Instance ID of Faculty App Server 2 (Windows)
+    Value: !Ref FacultyServer2
+
+  StudentDBEndpoint:
+    Description: RDS endpoint for the Student Database
+    Value: !GetAtt StudentDatabase.Endpoint.Address
+    Export:
+      Name: !Sub "${EnvironmentName}-RDS-Endpoint"
+
+  S3BucketName:
+    Description: S3 bucket for LMS assets and course materials
+    Value: !Ref YoobeeS3Bucket
+    Export:
+      Name: !Sub "${EnvironmentName}-S3-Bucket"
+
+  AutoScalingGroupName:
+    Description: LMS Auto Scaling Group name
+    Value: !Ref LMSAutoScalingGroup
+
+  CloudWatchDashboardURL:
+    Description: URL to the CloudWatch monitoring dashboard
+    Value: !Sub "https://${AWS::Region}.console.aws.amazon.com/cloudwatch/home?region=${AWS::Region}#dashboards:name=${EnvironmentName}-Infrastructure"
+
+  ITAdminGroupARN:
+    Description: IAM Group ARN for IT Administrators
+    Value: !GetAtt ITAdminGroup.Arn
+
+  FacultyGroupARN:
+    Description: IAM Group ARN for Faculty users
+    Value: !GetAtt FacultyGroup.Arn
+
+  StudentGroupARN:
+    Description: IAM Group ARN for Students
+    Value: !GetAtt StudentGroup.Arn
+
+  PrivateSubnet1Id:
+    Description: Private Subnet AZ1 ID
+    Value: !Ref PrivateSubnet1
+    Export:
+      Name: !Sub "${EnvironmentName}-PrivateSubnet1"
+
+  PrivateSubnet2Id:
+    Description: Private Subnet AZ2 ID
+    Value: !Ref PrivateSubnet2
+    Export:
+      Name: !Sub "${EnvironmentName}-PrivateSubnet2"
