@@ -1356,6 +1356,7 @@ Resources:
               "x": 0, "y": 0, "width": 12, "height": 6,
               "properties": {
                 "title": "EC2 CPU Utilization - All Servers",
+                "region": "${AWS::Region}",
                 "metrics": [
                   ["AWS/EC2","CPUUtilization","InstanceId","${LMSServer1}",{"label":"LMS-1"}],
                   ["AWS/EC2","CPUUtilization","InstanceId","${LMSServer2}",{"label":"LMS-2"}],
@@ -1376,6 +1377,7 @@ Resources:
               "x": 12, "y": 0, "width": 12, "height": 6,
               "properties": {
                 "title": "RDS - Connections & Storage",
+                "region": "${AWS::Region}",
                 "metrics": [
                   ["AWS/RDS","DatabaseConnections","DBInstanceIdentifier","${EnvironmentName}-student-db"],
                   ["AWS/RDS","FreeStorageSpace","DBInstanceIdentifier","${EnvironmentName}-student-db",{"yAxis":"right"}]
@@ -1390,6 +1392,7 @@ Resources:
               "x": 0, "y": 6, "width": 12, "height": 6,
               "properties": {
                 "title": "ALB - Request Count & 5xx Errors",
+                "region": "${AWS::Region}",
                 "metrics": [
                   ["AWS/ApplicationELB","RequestCount","LoadBalancer","${YoobeeALB.LoadBalancerFullName}"],
                   ["AWS/ApplicationELB","HTTPCode_ELB_5XX_Count","LoadBalancer","${YoobeeALB.LoadBalancerFullName}",{"color":"#ff0000"}]
@@ -1404,6 +1407,7 @@ Resources:
               "x": 12, "y": 6, "width": 12, "height": 6,
               "properties": {
                 "title": "Auto Scaling Group - Instance Count",
+                "region": "${AWS::Region}",
                 "metrics": [
                   ["AWS/AutoScaling","GroupInServiceInstances","AutoScalingGroupName","${EnvironmentName}-LMS-ASG"]
                 ],
